@@ -1,0 +1,24 @@
+{
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js",
+    "test": "node --test test/*.test.js",
+    "test:smoke": "node --test test/smoke-server.test.js",
+    "test:routes": "node --test test/route-utils.test.js",
+    "windows:cdp": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-main-codex-cdp.ps1 -OpenAfterPrepare",
+    "windows:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-windows-local.ps1",
+    "windows:panel": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Start-Process -FilePath ./Codex2Frp.exe\"",
+    "windows:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-launcher.ps1",
+    "windows:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-setup-exe.ps1"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true,
+  "name": "codex2frp",
+  "version": "1.0.0",
+  "description": "Windows local Codex bridge with remote-link access",
+  "license": "SEE LICENSE IN LICENSE"
+}

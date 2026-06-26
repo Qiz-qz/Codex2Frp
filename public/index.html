@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="application-name" content="Codex2Frp" />
+  <meta name="apple-mobile-web-app-title" content="Codex2Frp" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png" />
+  <title>Codex2Frp</title>
+  <link rel="stylesheet" href="styles/codex2frp-console.css?v=1.0.0" />
+</head>
+<body data-shell="operations-board">
+  <div class="app operations-board-app">
+    <header class="topbar operations-mast">
+      <div class="title">
+        <span class="title-dot"></span>
+        <button class="thread-button" id="thread-button" type="button"><span class="thread-current-pin" id="thread-current-pin" aria-hidden="true"></span><span class="thread-name" id="thread-name">选择线程</span></button>
+      </div>
+      <div class="top-actions">
+        <div class="context-status is-unknown mode-ring" id="top-status" aria-live="polite" aria-label="当前上下文用量"><span class="context-text"><span class="context-percent">--</span></span><span class="context-ring" aria-hidden="true"></span></div>
+        <div class="route-badge" id="route-badge" title="当前线路：本地" aria-label="当前线路：本地">
+          <svg class="route-icon" id="route-icon" viewBox="0 0 24 24" aria-hidden="true"></svg>
+          <span id="route-text">本地</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="notice-pill" id="notice" role="status" aria-live="polite"></div>
+    <div class="thread-menu-scrim" id="thread-menu-scrim" aria-hidden="true"></div>
+    <div class="thread-menu" id="thread-menu" aria-label="选择 Codex 线程"></div>
+
+    <main class="thread transcript-lane message-stage" id="thread" aria-label="聊天记录">
+      <div class="day-note">手机同步到当前 Codex 对话</div>
+    </main>
+
+    <footer class="composer-shell input-harbor">
+      <div class="queued-send-bar" id="queued-send" role="status" aria-live="polite">
+        <span class="queued-send-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20"><path d="M4.5 4.5v4.75c0 3 1.75 4.75 4.75 4.75h6.25"/><path d="M12.25 10.75 15.5 14l-3.25 3.25"/></svg>
+        </span>
+        <span class="queued-send-label" id="queued-send-label">待发送</span>
+        <span class="queued-send-text" id="queued-send-text"></span>
+      </div>
+      <form class="composer" id="composer">
+        <textarea id="text" rows="1" autocomplete="off" autocapitalize="sentences" spellcheck="false" placeholder="向 Codex2Frp 发送指令，或继续当前任务"></textarea>
+        <button class="send-btn stop-btn composer-action-hidden" id="stop" type="button" title="取消当前 Codex 回复" aria-label="取消当前 Codex 回复" hidden><span class="stop-square" aria-hidden="true"></span></button>
+        <button class="send-btn" id="send" type="submit" title="发送给 Codex2Frp" aria-label="发送给 Codex2Frp">↑</button>
+      </form>
+    </footer>
+  </div>
+  <script defer src="scripts/codex2frp-client.js?v=1.0.0"></script>
+</body>
+</html>

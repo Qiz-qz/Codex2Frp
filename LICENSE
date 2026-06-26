@@ -1,0 +1,23 @@
+Codex2Frp Source-Available Non-Commercial License Notice 1.0
+
+Copyright (c) 2026 Qiz.
+
+Codex2Frp is a Windows-focused local bridge for Codex Desktop.
+
+This project is a refactored derivative of Codex Mini.
+
+Upstream attribution:
+
+- Upstream project: Codex Mini
+- Upstream author: CoimgRain
+- Upstream repository: https://github.com/CoimgRain/Codex-Mini
+- Upstream license: Source-Available Non-Commercial License 1.0
+- Upstream license URL: https://github.com/CoimgRain/Codex-Mini/blob/main/LICENSE
+
+Codex2Frp is distributed as a source-available, non-commercial derivative. You may use, inspect, and modify this repository for local personal, educational, research, and evaluation purposes, subject to the non-commercial and attribution requirements of the upstream Codex Mini license.
+
+Any derivative, public release, or public deployment of Codex2Frp must preserve attribution to Codex Mini, CoimgRain, and the upstream repository link above, and must preserve this license notice or a clearly equivalent attribution and license notice.
+
+Redistribution of a public derivative should also make clear that Codex2Frp is maintained by Qiz and is not the upstream Codex Mini project.
+
+This software is provided "as is", without warranty of any kind. You are responsible for protecting your local access token, remote-link credentials, computer data, and network exposure.
