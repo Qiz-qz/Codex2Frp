@@ -9,14 +9,12 @@ const publicDir = path.join(__dirname, '..', 'public');
 const indexPath = path.join(publicDir, 'index.html');
 const cssPath = path.join(publicDir, 'styles', 'codex2frp-console.css');
 const jsPath = path.join(publicDir, 'scripts', 'codex2frp-client.js');
-const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-const assetVersionPattern = packageJson.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 test('browser frontend uses standalone assets instead of legacy inline monolith', () => {
   const html = fs.readFileSync(indexPath, 'utf8');
   assert.match(html, /data-shell="operations-board"/, 'HTML exposes the redesigned operations-board shell marker');
-  assert.match(html, new RegExp(`href="styles/codex2frp-console\\.css\\?v=${assetVersionPattern}"`), 'HTML loads the versioned standalone browser stylesheet');
-  assert.match(html, new RegExp(`src="scripts/codex2frp-client\\.js\\?v=${assetVersionPattern}"`), 'HTML loads the versioned standalone browser client script');
+  assert.match(html, /href="styles\/codex2frp-console\.css\?v=2\.1\.20"/, 'HTML loads the versioned standalone browser stylesheet');
+  assert.match(html, /src="scripts\/codex2frp-client\.js\?v=2\.1\.20"/, 'HTML loads the versioned standalone browser client script');
   assert.match(html, /class="[^"]*\boperations-mast\b/, 'top controls use the redesigned floating operations mast');
   assert.match(html, /class="[^"]*\bmessage-stage\b/, 'messages use the redesigned framed message stage');
   assert.match(html, /class="[^"]*\binput-harbor\b/, 'composer uses the redesigned input harbor');

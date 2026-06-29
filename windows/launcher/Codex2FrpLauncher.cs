@@ -19,7 +19,7 @@ namespace Codex2FrpLauncher
     internal static class Program
     {
         internal const string AppDisplayName = "Codex2Frp";
-        internal const string AppVersion = "1.1.0";
+        internal const string AppVersion = "1.2.0";
         internal const int ServicePort = 8988;
         internal const string ServicePortDisplay = "8988";
         internal const string DefaultSakuraDomain = "";

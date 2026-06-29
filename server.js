@@ -106,6 +106,7 @@ const CODEX_COMPOSER_REFERENCE_VERIFY_MS = Number(process.env.CODEX2FRP_COMPOSER
 const CODEX_MODE_OPTIONS_CACHE_MS = Number(process.env.CODEX2FRP_MODE_OPTIONS_CACHE_MS || 30000);
 const CODEX_MODE_OPTIONS_REFRESH_TIMEOUT_MS = Number(process.env.CODEX2FRP_MODE_OPTIONS_REFRESH_TIMEOUT_MS || 6500);
 const CODEX_CONFIG_SWITCH_VERIFY_MS = Number(process.env.CODEX2FRP_CONFIG_SWITCH_VERIFY_MS || 2200);
+const CODEX_WINDOW_RESTORE_SETTLE_MS = Number(process.env.CODEX2FRP_WINDOW_RESTORE_SETTLE_MS || 260);
 const REASONING_MODE_TARGETS = {
   low: { key: 'low', value: 'low', label: '低', displayName: '低' },
   medium: { key: 'medium', value: 'medium', label: '中', displayName: '中' },
@@ -2986,6 +2987,37 @@ function runPowerShell(script, input = '') {
   return runProcess(powershellExe(), ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], input);
 }
 
+async function restoreCodexDesktopWindow(options = {}) {
+  if (process.platform !== 'win32') return false;
+  const settleMs = Number(options.settleMs ?? CODEX_WINDOW_RESTORE_SETTLE_MS);
+  const script = `
+$definition = @"
+using System;
+using System.Runtime.InteropServices;
+public static class Codex2FrpWindowOps {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+"@
+Add-Type -TypeDefinition $definition -ErrorAction SilentlyContinue | Out-Null
+$windows = Get-Process Codex -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
+$count = 0
+foreach ($process in $windows) {
+  [Codex2FrpWindowOps]::ShowWindowAsync($process.MainWindowHandle, 9) | Out-Null
+  [Codex2FrpWindowOps]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
+  $count += 1
+}
+Write-Output $count
+`;
+  try {
+    const { stdout } = await runPowerShell(script);
+    if (settleMs > 0) await delay(settleMs);
+    return Number(String(stdout || '').trim()) > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function openWindowsUri(uri) {
   await runPowerShell(`Start-Process -FilePath ${psSingleQuote(uri)}`);
 }
@@ -4538,6 +4570,7 @@ function codexPlusMenuItemsFromSnapshot(snapshot = {}) {
 }
 
 async function readCodexPlusMenuItemsViaCdp() {
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -4632,6 +4665,7 @@ async function clickCodexPlusRectWithoutSendCheck(client, rect = {}) {
 
 async function selectCodexPlusMenuItemViaCdp(labels = []) {
   const targetLabels = uniqueTextList(labels);
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -4686,6 +4720,7 @@ async function selectCodexPlusMenuItemViaCdp(labels = []) {
 
 async function clickCodexSidebarButtonViaCdp(labels = []) {
   const targetLabels = uniqueTextList(labels);
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -4893,6 +4928,7 @@ function resolveLiveSpeedOptions(speedSupported, currentSpeed = null, liveModeOp
 }
 
 async function readCodexModeOptionsViaCdp() {
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -5060,6 +5096,7 @@ async function selectCodexComposerModeMenuItemViaCdp(targetLabels = [], options 
     throw new Error('没有可选择的 Codex 菜单目标。');
   }
 
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -5410,6 +5447,7 @@ async function focusTarget(target, threadId = '', options = {}) {
   if (threadId && isCodexThreadId(threadId)) {
     await activateCodexThread(threadId, { allowCached: Boolean(options.assumeThreadSynced) });
   }
+  await restoreCodexDesktopWindow();
   if (options.skipComposerClick) return;
   if (threadId && isCodexThreadId(threadId)) {
     await delay(CODEX_APP_FOCUS_SETTLE_MS);
@@ -5426,6 +5464,7 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
     return { ok: false, skipped: true, reason: 'empty-thread' };
   }
 
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget({ autoOpen: false });
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -5502,6 +5541,7 @@ async function activateCodexThreadForComposerAction(threadId = '') {
 }
 
 async function focusCurrentCodexComposerForComposerAction(threadId = '', activationResult = null) {
+  await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget({ autoOpen: false });
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
@@ -5526,6 +5566,7 @@ async function focusCurrentCodexComposerForComposerAction(threadId = '', activat
 async function activateCodexThread(threadId = '', options = {}) {
   if (options.allowCached && hasFreshCodexThreadActivation(threadId)) {
     await openWindowsUri('codex://');
+    await restoreCodexDesktopWindow();
     await delay(CODEX_APP_FOCUS_SETTLE_MS);
     return;
   }
@@ -5536,6 +5577,7 @@ async function activateCodexThread(threadId = '', options = {}) {
     await delay(CODEX_DEEPLINK_SETTLE_MS);
   }
   await openWindowsUri('codex://');
+  await restoreCodexDesktopWindow();
   await delay(CODEX_APP_FOCUS_SETTLE_MS);
   if (isCodexThreadId(threadId)) lastCodexThreadActivation = { threadId, at: Date.now() };
 }
@@ -5545,6 +5587,7 @@ async function activateNewCodexThread(cwd = '') {
   await openWindowsUri(deepLink);
   await delay(CODEX_DEEPLINK_SETTLE_MS + 180);
   await openWindowsUri('codex://');
+  await restoreCodexDesktopWindow();
   await delay(CODEX_APP_FOCUS_SETTLE_MS);
   lastCodexThreadActivation = { threadId: '', at: 0 };
 }
@@ -5563,6 +5606,7 @@ async function activateNewProjectlessCodexThread(anchorThreadId = '') {
     await activateNewCodexThread('');
   }
   await openWindowsUri('codex://');
+  await restoreCodexDesktopWindow();
   await delay(CODEX_APP_FOCUS_SETTLE_MS);
   lastCodexThreadActivation = { threadId: '', at: 0 };
 }
@@ -5835,6 +5879,7 @@ async function pressCodexShortcut(key, modifiers = []) {
 }
 
 async function pressCancelCodexResponse() {
+  await restoreCodexDesktopWindow();
   await sendWindowsKeys('{ESC}');
   await delay(80);
   await sendWindowsKeys(windowsShortcutExpression('.', ['control']));
@@ -6078,17 +6123,31 @@ async function switchCodexGuiModel(threadId = '', targetKey = '') {
   const current = file ? currentModelFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : modelInfoFromId('');
   const target = modelSwitchTargetForCurrent(current, targetKey);
 
-  const liveTargetModel = await trySyncCodexModelViaExistingCdp(target);
-  await trySwitchCodexModelViaConfig(liveTargetModel || target);
-  const finalTargetModel = liveTargetModel;
+  let liveTargetModel = null;
+  let liveSyncError = null;
+  try {
+    liveTargetModel = await trySyncCodexModelViaExistingCdp(target);
+  } catch (error) {
+    liveSyncError = error;
+  }
+  const configTargetModel = await trySwitchCodexModelViaConfig(liveTargetModel || target);
+  const finalTargetModel = liveTargetModel || configTargetModel;
   writeControlOverride('model', finalTargetModel.id || target.id || target.key || target.displayName || targetKey);
 
   return {
     ok: true,
     threadId,
     currentModel: current,
-    targetModel: { ...finalTargetModel, updatedAt: new Date().toISOString(), fallback: false, liveSynced: Boolean(liveTargetModel) },
-    message: `已切换到 ${finalTargetModel.displayName || finalTargetModel.id || target.displayName}`,
+    targetModel: {
+      ...finalTargetModel,
+      updatedAt: new Date().toISOString(),
+      fallback: !liveTargetModel,
+      liveSynced: Boolean(liveTargetModel),
+      liveSyncErrorCode: liveSyncError && liveSyncError.code || '',
+    },
+    message: liveTargetModel
+      ? `已切换到 ${finalTargetModel.displayName || finalTargetModel.id || target.displayName}`
+      : `已保存模型为 ${finalTargetModel.displayName || finalTargetModel.id || target.displayName}，当前运行中的回复不受影响，后续任务生效。`,
   };
 }
 
@@ -6164,17 +6223,31 @@ async function switchCodexReasoningMode(threadId = '', targetKey = '') {
   const current = file ? currentReasoningModeFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : reasoningModeFromValue('');
   const target = reasoningModeTargetForCurrent(current, targetKey);
 
-  const liveTargetReasoning = await trySyncCodexReasoningViaExistingCdp(target);
-  await trySwitchCodexReasoningViaConfig(liveTargetReasoning || target);
-  const finalTargetReasoning = liveTargetReasoning;
+  let liveTargetReasoning = null;
+  let liveSyncError = null;
+  try {
+    liveTargetReasoning = await trySyncCodexReasoningViaExistingCdp(target);
+  } catch (error) {
+    liveSyncError = error;
+  }
+  const configTargetReasoning = await trySwitchCodexReasoningViaConfig(liveTargetReasoning || target);
+  const finalTargetReasoning = liveTargetReasoning || configTargetReasoning;
   writeControlOverride('reasoning', finalTargetReasoning.key || target.key || target.value);
 
   return {
     ok: true,
     threadId,
     currentReasoningMode: current,
-    targetReasoningMode: { ...finalTargetReasoning, updatedAt: new Date().toISOString(), fallback: false, liveSynced: Boolean(liveTargetReasoning) },
-    message: `已切换推理模式为 ${finalTargetReasoning.displayName || target.displayName}`,
+    targetReasoningMode: {
+      ...finalTargetReasoning,
+      updatedAt: new Date().toISOString(),
+      fallback: !liveTargetReasoning,
+      liveSynced: Boolean(liveTargetReasoning),
+      liveSyncErrorCode: liveSyncError && liveSyncError.code || '',
+    },
+    message: liveTargetReasoning
+      ? `已切换推理模式为 ${finalTargetReasoning.displayName || target.displayName}`
+      : `已保存推理强度为 ${finalTargetReasoning.displayName || target.displayName}，当前运行中的回复不受影响，后续任务生效。`,
   };
 }
 
@@ -6230,18 +6303,38 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
   }
   const target = speedModeTargetForCurrent(currentMode, targetKey);
 
-  const liveTargetSpeed = await trySyncCodexSpeedViaExistingCdp(target);
-  await trySwitchCodexSpeedViaConfig(liveTargetSpeed || target);
-  const finalTargetSpeed = liveTargetSpeed;
+  let liveTargetSpeed = null;
+  let liveSyncError = null;
+  try {
+    liveTargetSpeed = await trySyncCodexSpeedViaExistingCdp(target);
+  } catch (error) {
+    liveSyncError = error;
+  }
+  const configTargetSpeed = await trySwitchCodexSpeedViaConfig(liveTargetSpeed || target);
+  const finalTargetSpeed = liveTargetSpeed || configTargetSpeed;
   writeControlOverride('speed', finalTargetSpeed.key || target.key || target.value);
 
   return {
     ok: true,
     threadId,
     currentSpeedMode: currentMode,
-    speedMode: { ...finalTargetSpeed, updatedAt: new Date().toISOString(), fallback: false, liveSynced: Boolean(liveTargetSpeed) },
-    targetSpeedMode: { ...finalTargetSpeed, updatedAt: new Date().toISOString(), fallback: false, liveSynced: Boolean(liveTargetSpeed) },
-    message: `已切换速度为 ${finalTargetSpeed.displayName || target.displayName}`,
+    speedMode: {
+      ...finalTargetSpeed,
+      updatedAt: new Date().toISOString(),
+      fallback: !liveTargetSpeed,
+      liveSynced: Boolean(liveTargetSpeed),
+      liveSyncErrorCode: liveSyncError && liveSyncError.code || '',
+    },
+    targetSpeedMode: {
+      ...finalTargetSpeed,
+      updatedAt: new Date().toISOString(),
+      fallback: !liveTargetSpeed,
+      liveSynced: Boolean(liveTargetSpeed),
+      liveSyncErrorCode: liveSyncError && liveSyncError.code || '',
+    },
+    message: liveTargetSpeed
+      ? `已切换速度为 ${finalTargetSpeed.displayName || target.displayName}`
+      : `已保存速度为 ${finalTargetSpeed.displayName || target.displayName}，当前运行中的回复不受影响，后续任务生效。`,
   };
 }
 

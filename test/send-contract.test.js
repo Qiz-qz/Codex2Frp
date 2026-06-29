@@ -600,6 +600,8 @@ test('mode menu selection follows Codex nested model and speed menus', () => {
   const helperBody = functionBody('selectCodexComposerModeMenuItemViaCdp');
   const clickBody = functionBody('cdpClickRect');
   const closeBody = functionBody('closeCodexCdpMenus');
+  assert.match(serverSource, /async function restoreCodexDesktopWindow/, 'backend can restore a minimized Codex desktop window before explicit controls');
+  assert.match(helperBody, /restoreCodexDesktopWindow\(\)/, 'mode switch restores the Codex desktop window before reading or clicking menu controls');
   assert.match(helperBody, /findSubmenuTriggerByText\(snapshot,\s*'模型'\)/, 'model switch explicitly opens the model submenu');
   assert.match(helperBody, /findSubmenuTriggerByText\(snapshot,\s*'速度'\)/, 'speed switch explicitly opens the speed submenu');
   assert.match(serverSource, /data-codex-intelligence-trigger/, 'mode menu selection targets Codex’s real intelligence control button');
@@ -610,4 +612,24 @@ test('mode menu selection follows Codex nested model and speed menus', () => {
   assert.match(closeBody, /assertCodexCdpIdleForControlAction/, 'closing Codex menus refuses to press Escape while a response is running');
   assert.match(functionBody('assertCodexCdpIdleForControlAction'), /CODEX_CONTROL_UNAVAILABLE_WHILE_RUNNING/, 'running-state guard reports a clear non-stop-control error instead of interrupting Codex');
   assert.doesNotMatch(helperBody, /dispatchEvent\(new PointerEvent|dispatchEvent\(new MouseEvent/, 'mode menu selection does not rely on synthetic DOM mouse events');
+});
+
+test('model, reasoning, and speed switches fall back to config while Codex is running or minimized', () => {
+  const modelBody = functionBody('switchCodexGuiModel');
+  const reasoningBody = functionBody('switchCodexReasoningMode');
+  const speedBody = functionBody('switchCodexSpeedMode');
+  for (const body of [modelBody, reasoningBody, speedBody]) {
+    assert.match(body, /try\s*\{[\s\S]*trySyncCodex[\s\S]*\}\s*catch\s*\(error\)/, 'live CDP sync errors are caught instead of failing the switch');
+    assert.match(body, /trySwitchCodex[\s\S]*ViaConfig\(liveTarget[\s\S]*\|\| target\)/, 'mode switches still write Codex config when live menu sync is unavailable');
+    assert.match(body, /fallback:\s*!liveTarget/, 'response reports that the switch used a non-live fallback');
+    assert.match(body, /liveSyncErrorCode/, 'response keeps the CDP failure code for diagnostics');
+    assert.match(body, /当前运行中的回复不受影响，后续任务生效/, 'fallback message clearly explains that running replies keep their original mode');
+  }
+});
+
+test('explicit Codex controls restore minimized windows before plus menu and stop actions', () => {
+  assert.match(functionBody('readCodexPlusMenuItemsViaCdp'), /restoreCodexDesktopWindow\(\)/, 'plus-menu reader restores minimized Codex before querying the desktop menu');
+  assert.match(functionBody('selectCodexPlusMenuItemViaCdp'), /restoreCodexDesktopWindow\(\)/, 'plus-menu item insertion restores minimized Codex before clicking');
+  assert.match(serverSource, /async function activateCodexThread\(threadId = '', options = \{\}\)[\s\S]*openWindowsUri\('codex:\/\/'\)[\s\S]*restoreCodexDesktopWindow\(\)/, 'thread activation restores the app after codex:// navigation');
+  assert.match(functionBody('pressCancelCodexResponse'), /restoreCodexDesktopWindow\(\)[\s\S]*sendWindowsKeys\('\{ESC\}'\)/, 'stop command restores the app before sending cancellation keys');
 });

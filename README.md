@@ -2,7 +2,7 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.1.0`.
+Current version: `v1.2.0`.
 
 ## What It Does
 
@@ -25,7 +25,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.1.0/              Latest public installer release
+release/v1.2.0/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -34,25 +34,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.1.0/Codex2FrpSetup-v1.1.0.exe
+release/v1.2.0/Codex2FrpSetup-v1.2.0.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.1.0/SHA256SUMS.txt
+release/v1.2.0/SHA256SUMS.txt
 ```
 
 The current SHA-256 is:
 
 ```text
-4e9ed4817c697fe0126957cddc39f39ae1e2bcb964af922b2a0ad08560458a0b  Codex2FrpSetup-v1.1.0.exe
+f2fa0be4449ce70509624392b1681d9ece0a239ab07f335063f63385f9600843  Codex2FrpSetup-v1.2.0.exe
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.1.0.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.2.0.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -181,16 +181,18 @@ and update `SHA256SUMS.txt`.
 
 ## Release Notes
 
+### v1.2.0
+
+- Model, reasoning, and speed switches now save the requested mode while Codex is replying, instead of failing the mobile action. The current running reply is left untouched and later tasks use the saved mode.
+- Explicit Codex controls now restore a minimized Codex Desktop window before reading the composer plus menu, focusing the composer, switching threads, or sending a stop command.
+- Mobile control failures no longer get mistaken for LAN or remote-link failures by the paired app.
+
 ### v1.1.0
 
-- Syncs the public build with the current desktop-thread bridge, including realtime current-thread detection for Codex clients that expose sidebar ids as `local:<thread-id>`.
-- `/codex/threads` now reports the current desktop Codex thread id and keeps that thread in the response even when it falls outside the requested list limit.
-- Mobile and browser clients can follow desktop-side thread switches without restarting and without auto-opening additional Codex clients.
+- `/codex/threads` now reports the current desktop Codex thread id and metadata, so mobile clients can follow desktop-side thread switches without restarting.
+- The thread list keeps the current desktop thread in the response even when it would otherwise fall outside the requested list limit.
+- Realtime mobile sync now observes desktop thread selection without auto-opening additional Codex clients, including current Codex builds that expose sidebar ids as `local:<thread-id>`.
 - The Windows control panel now keeps periodic status refreshes, log reads, remote-link checks, and long Codex-control actions off the WinForms UI thread for smoother clicking and less UI freezing.
-
-### v1.0.0
-
-- First public snapshot of the Windows Codex Desktop bridge, browser console, Windows control panel, and local/LAN/remote-link access flow.
 
 ## License
 
