@@ -579,6 +579,18 @@ test('thread fallback titles ignore Codex internal context records', () => {
 
 test('chat-mutating routes invalidate thread cache for realtime mobile state', () => {
   assert.match(functionBody('handleThreads'), /refresh'\) === '1'[\s\S]*invalidateCodexThreadListCache/, 'explicit thread refresh bypasses the short thread-list cache');
+  assert.match(serverSource, /async function readCurrentCodexThreadSelectionViaCdp/, 'backend can read the current desktop thread through existing CDP without launching Codex');
+  assert.match(serverSource, /CODEX_CURRENT_THREAD_CACHE_MS/, 'current desktop thread selection is cached briefly');
+  assert.match(serverSource, /function normalizeCodexThreadId/, 'backend normalizes Codex desktop local-prefixed thread ids');
+  assert.match(serverSource, /function findCodexThreadIdByVisibleText/, 'backend can fall back to matching visible chat text when the selected sidebar row is not marked active');
+  assert.match(functionBody('normalizeCurrentThreadSelection'), /normalizeCodexThreadId\(value\.threadId\)/, 'current thread selection strips Codex local: prefixes before matching session files');
+  assert.match(functionBody('normalizeCurrentThreadSelection'), /findCodexThreadIdByVisibleText\(preview\)/, 'current thread selection can resolve the active thread from the main chat content');
+  assert.match(functionBody('readCurrentCodexThreadSelectionViaCdp'), /\^\(\?:local:\)\?\[a-f0-9\]/, 'desktop current-thread reader accepts current Codex local-prefixed sidebar ids');
+  assert.match(functionBody('readCurrentCodexThreadSelectionViaCdp'), /document\.querySelector\('main'\)[\s\S]*preview/, 'desktop current-thread reader captures main chat text when the sidebar has no active marker');
+  assert.match(functionBody('activateCodexThreadViaExistingCdp'), /normalizeThreadId\(el\.getAttribute\('data-app-action-sidebar-thread-id'\)\) === threadId/, 'CDP thread activation matches local-prefixed sidebar ids to stored thread ids');
+  assert.match(functionBody('handleThreads'), /readCurrentCodexThreadSelection\(\{ force: forceRefresh \}\)/, 'threads endpoint refreshes current desktop thread selection');
+  assert.match(functionBody('handleThreads'), /selectedThreadId[\s\S]*currentThreadId[\s\S]*currentThread[\s\S]*threads/, 'threads endpoint returns the current desktop thread id to mobile clients');
+  assert.match(functionBody('listCodexThreads'), /includeThreadId[\s\S]*threads\.some\(item => item\.id === includeThreadId\)/, 'thread list keeps the current desktop thread even when it falls outside the limit');
   assert.match(functionBody('handleSend'), /invalidateCodexThreadListCache\(\)[\s\S]*watchSince[\s\S]*invalidateCodexThreadListCache\(\)[\s\S]*return json/, 'send invalidates thread cache before and after accepting a message');
   assert.match(functionBody('handleStopCodex'), /invalidateCodexThreadListCache\(\)[\s\S]*stopCodexResponse[\s\S]*invalidateCodexThreadListCache\(\)/, 'stop invalidates runtime cache around the stop command');
   assert.match(functionBody('handleSelectThread'), /invalidateCodexThreadListCache\(\)[\s\S]*activateCodexThread/, 'select-thread clears thread cache before activating Codex');

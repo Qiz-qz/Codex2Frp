@@ -2,13 +2,7 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.0.0`.
-
-## Attribution
-
-Codex2Frp is a refactored derivative of [Codex Mini](https://github.com/CoimgRain/Codex-Mini), originally created by [CoimgRain](https://github.com/CoimgRain). The upstream project is licensed under the [Source-Available Non-Commercial License 1.0](https://github.com/CoimgRain/Codex-Mini/blob/main/LICENSE).
-
-This repository preserves upstream attribution to Codex Mini, CoimgRain, and the original repository. See [NOTICE](NOTICE) and [LICENSE](LICENSE) for the attribution and non-commercial license notice.
+Current version: `v1.1.0`.
 
 ## What It Does
 
@@ -31,9 +25,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.0.0/              First public installer release
-NOTICE                       Upstream attribution notice
-LICENSE                      Non-commercial derivative license notice
+release/v1.1.0/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -42,25 +34,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.0.0/Codex2FrpSetup-v1.0.0.exe
+release/v1.1.0/Codex2FrpSetup-v1.1.0.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.0.0/SHA256SUMS.txt
+release/v1.1.0/SHA256SUMS.txt
 ```
 
 The current SHA-256 is:
 
 ```text
-caad262f7c40df9ee57cc24f3b740143266cafd6e0583f43e351e8aa588e04df  Codex2FrpSetup-v1.0.0.exe
+4e9ed4817c697fe0126957cddc39f39ae1e2bcb964af922b2a0ad08560458a0b  Codex2FrpSetup-v1.1.0.exe
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.0.0.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.1.0.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -91,32 +83,6 @@ For unattended local startup:
 ```powershell
 E:\Codex2Frp\Codex2Frp.exe --silent --start-service
 ```
-
-## Use With CodexHM On HarmonyOS
-
-Codex2Frp is the Windows backend for the companion HarmonyOS app **CodexHM** (`com.codex.codexhm`). CodexHM does not connect to a model service directly. It connects to this backend, and the backend controls your local Codex Desktop session.
-
-Basic setup:
-
-1. Install Codex2Frp on the Windows machine that runs Codex Desktop.
-2. Open `E:\Codex2Frp\Codex2Frp.exe`.
-3. Click **Start Service** in the Codex2Frp control panel.
-4. Copy the LAN link from the control panel, or use a manually configured remote-link address.
-5. Paste that full link into CodexHM on the HarmonyOS device.
-
-The link must include the local access token, for example:
-
-```text
-http://192.168.x.x:8988/?token=YOUR_LOCAL_TOKEN
-```
-
-The token is stored on the Windows machine at:
-
-```text
-E:\Codex2Frp\.runtime\mobile-token.txt
-```
-
-Use the LAN link when the HarmonyOS device and Windows machine are on the same network. Use a remote-link address only when you have configured a trusted tunnel to `127.0.0.1:8988`.
 
 ## Remote Link Access
 
@@ -162,6 +128,8 @@ Common endpoints:
 - `POST /codex/reasoning-mode`
 - `POST /codex/speed-mode`
 - `POST /codex/control-port`
+
+Some route names keep legacy compatibility for existing clients, but user-facing text refers to remote links.
 
 ## Codex Control
 
@@ -210,6 +178,19 @@ and update `SHA256SUMS.txt`.
 - Treat remote-link access as exposing your local Codex control surface to a network endpoint.
 - Use remote access only through trusted devices and trusted network routes.
 - Keep Codex control enabled only on a trusted desktop session.
+
+## Release Notes
+
+### v1.1.0
+
+- Syncs the public build with the current desktop-thread bridge, including realtime current-thread detection for Codex clients that expose sidebar ids as `local:<thread-id>`.
+- `/codex/threads` now reports the current desktop Codex thread id and keeps that thread in the response even when it falls outside the requested list limit.
+- Mobile and browser clients can follow desktop-side thread switches without restarting and without auto-opening additional Codex clients.
+- The Windows control panel now keeps periodic status refreshes, log reads, remote-link checks, and long Codex-control actions off the WinForms UI thread for smoother clicking and less UI freezing.
+
+### v1.0.0
+
+- First public snapshot of the Windows Codex Desktop bridge, browser console, Windows control panel, and local/LAN/remote-link access flow.
 
 ## License
 

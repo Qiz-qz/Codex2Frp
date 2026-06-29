@@ -188,12 +188,38 @@ test('launcher locks cached Sakura form while service is running and unlocks it 
   assert.doesNotMatch(unlockBody, /API 密钥|_accessKeyBox|CachedApiTokenPlaceholder/, 'modify guidance only mentions the remaining link and port fields');
 
   const statusBody = bodyAfter('private void UpdateModernStatus()');
-  assert.match(statusBody, /LoadSakuraCachedForm\(\)/, 'status refresh imports cached Sakura values');
-  assert.match(statusBody, /ApplySakuraFormLockState\(running\)/, 'status refresh locks cached fields while the service is running');
+  assert.match(statusBody, /QueueStatusRefresh\(\)/, 'status refresh delegates expensive work to the background refresh path');
+  assert.doesNotMatch(statusBody, /GetServerProcess\(|GetLocalJson\(|ReadLogTail\(|CheckRemoteUnavailableNotice\(/, 'status refresh does not run process, network, log, or remote checks on the UI thread');
+  const buildSnapshotBody = bodyAfter('private StatusSnapshot BuildStatusSnapshot');
+  assert.match(buildSnapshotBody, /GetLocalJson\("\/codex\/sakura\/status",\s*2500\)/, 'background status snapshot imports cached Sakura values with a short timeout');
+  assert.match(buildSnapshotBody, /ReadLogTail\(_paths\.StdoutPath,\s*32\)/, 'background status snapshot reads logs outside the UI thread');
+  const applySnapshotBody = bodyAfter('private void ApplyStatusSnapshot');
+  assert.match(applySnapshotBody, /_sakuraFormFromCache\s*=\s*true/, 'applying a background snapshot marks restored Sakura values as cache-derived');
+  assert.match(applySnapshotBody, /ApplySakuraFormLockState\(snapshot\.Running\)/, 'applying a background snapshot locks cached fields while the service is running');
 
   const saveBody = bodyAfter('private void SaveSakuraConfig()');
   assert.match(saveBody, /_sakuraFormFromCache\s*=\s*false/, 'saving clears the cache-derived marker');
   assert.match(saveBody, /_sakuraFormEditMode\s*=\s*false/, 'saving exits edit mode after validation');
+});
+
+test('launcher status and long actions stay off the WinForms UI thread', () => {
+  assert.doesNotMatch(launcherSource, /Application\.DoEvents\(\)/, 'launcher must not pump nested UI events during busy states');
+  const queueBody = bodyAfter('private void QueueStatusRefresh()');
+  assert.match(queueBody, /Interlocked\.CompareExchange/, 'status refresh coalesces overlapping timer ticks');
+  assert.match(queueBody, /ThreadPool\.QueueUserWorkItem/, 'status refresh work runs outside the UI thread');
+  assert.match(queueBody, /BeginInvoke\(/, 'status refresh applies results back on the WinForms thread');
+  assert.match(queueBody, /BuildStatusSnapshot\(request\)/, 'status refresh gathers process, network, and log state in a snapshot');
+
+  const cdpButtonBody = launcherSource.slice(launcherSource.indexOf('cdpButton.Click'), launcherSource.indexOf('_saveSakuraButton.Click'));
+  assert.match(cdpButtonBody, /StartCodexCdp\(\)/, 'Codex control click opens confirmation immediately on the UI thread');
+  const cdpBody = bodyAfter('private void StartCodexCdp()');
+  assert.match(cdpBody, /RunBackgroundUiAction/, 'Codex control startup runs after confirmation on a background worker');
+  assert.match(cdpBody, /PostLocalJson\("\/codex\/control-port"/, 'Codex control still calls the backend control-port endpoint');
+
+  const openBody = launcherSource.slice(launcherSource.indexOf('openButton.Click'), launcherSource.indexOf('copyLocalButton.Click'));
+  assert.match(openBody, /RunBackgroundUiAction/, 'open console action does not start the backend on the UI thread');
+  const remoteCopyBody = launcherSource.slice(launcherSource.indexOf('copySakuraButton.Click'), launcherSource.indexOf('logsButton.Click'));
+  assert.match(remoteCopyBody, /RunBackgroundUiAction/, 'remote-link copy does not run remote health checks on the UI thread');
 });
 
 test('installer stops stale backend that only exposes itself through the service port', () => {

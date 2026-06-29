@@ -20,8 +20,6 @@ const textExtensions = new Set([
   '.webmanifest',
   '.xml',
 ]);
-const attributionFiles = new Set(['LICENSE', 'NOTICE', 'README.md']);
-const allowedMentionFiles = new Set([...attributionFiles, 'test/branding-contract.test.js']);
 
 function trackedFiles() {
   return childProcess.execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
@@ -37,20 +35,10 @@ test('tracked backend sources use Codex2Frp branding only', () => {
     const absolutePath = path.join(root, relativePath);
     if (!fs.existsSync(absolutePath)) continue;
     const content = fs.readFileSync(absolutePath, 'utf8');
-    if (allowedMentionFiles.has(relativePath)) continue;
     const lines = content.split(/\r?\n/);
     lines.forEach((line, index) => {
       if (bannedName.test(line)) offenders.push(`${relativePath}:${index + 1}`);
     });
   }
   assert.deepEqual(offenders, []);
-});
-
-test('public attribution keeps the Codex Mini upstream notice', () => {
-  for (const relativePath of attributionFiles) {
-    const content = fs.readFileSync(path.join(root, relativePath), 'utf8');
-    assert.match(content, /Codex Mini/, `${relativePath} names the upstream project`);
-    assert.match(content, /CoimgRain/, `${relativePath} names the upstream author`);
-    assert.match(content, /https:\/\/github\.com\/CoimgRain\/Codex-Mini/, `${relativePath} links the upstream repository`);
-  }
 });

@@ -1,10 +1,10 @@
 # Codex2Frp Releases
 
-This folder stores versioned Codex2Frp Windows install packages.
+This directory keeps the latest public installer package.
 
-## Layout
+Current public release:
 
-- `vX.Y.Z/`: install packages for one backend version.
-- `SHA256SUMS.txt`: checksum file for packages in that version folder.
+- `v1.1.0`
+- `release/v1.1.0/Codex2FrpSetup-v1.1.0.exe`
 
-Build outputs under `dist/` remain local artifacts.
+Verify installers with the matching `SHA256SUMS.txt` file before installing.

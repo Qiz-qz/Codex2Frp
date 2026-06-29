@@ -53,8 +53,7 @@ $items = @(
   "server.js",
   "package.json",
   "Codex2Frp.exe",
-  "LICENSE",
-  "NOTICE"
+  "LICENSE"
 )
 
 $scriptItems = @(

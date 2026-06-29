@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -18,7 +19,7 @@ namespace Codex2FrpLauncher
     internal static class Program
     {
         internal const string AppDisplayName = "Codex2Frp";
-        internal const string AppVersion = "1.0.0";
+        internal const string AppVersion = "1.1.0";
         internal const int ServicePort = 8988;
         internal const string ServicePortDisplay = "8988";
         internal const string DefaultSakuraDomain = "";
@@ -503,7 +504,7 @@ namespace Codex2FrpLauncher
     internal sealed class ControlPanelForm : Form
     {
         private readonly RuntimePaths _paths;
-        private readonly Timer _timer;
+        private readonly System.Windows.Forms.Timer _timer;
         private readonly Label _statusLabel;
         private readonly Label _subStatusLabel;
         private readonly TextBox _urlBox;
@@ -531,6 +532,8 @@ namespace Codex2FrpLauncher
         private bool _controlWarningShown;
         private bool _sakuraFormFromCache;
         private bool _sakuraFormEditMode;
+        private int _statusRefreshInFlight;
+        private int _statusRefreshAgain;
         private string _lastRemoteUnavailableNoticeKey = "";
 
         public ControlPanelForm(string projectRoot)
@@ -707,14 +710,22 @@ namespace Codex2FrpLauncher
             main.Controls.Add(footer);
 
             _startButton.Click += delegate { BeginStartServer(); };
-            _stopButton.Click += delegate { RunUiAction(StopServer); };
-            openButton.Click += delegate { RunUiAction(delegate { EnsureServerRunning(); Process.Start(GetLocalUrl()); }); };
+            _stopButton.Click += delegate { RunBackgroundUiAction(StopServer, "正在停止服务，请稍候..."); };
+            openButton.Click += delegate { RunBackgroundUiAction(delegate { EnsureServerRunning(); Process.Start(GetLocalUrl()); }, "正在打开本机控制台..."); };
             copyLocalButton.Click += delegate { RunUiAction(delegate { Clipboard.SetText(GetLocalUrl()); }); };
             copyLanButton.Click += delegate { RunUiAction(delegate { Clipboard.SetText(GetLanUrlOrThrow()); }); };
-            copySakuraButton.Click += delegate { RunUiAction(delegate { Clipboard.SetText(GetSakuraUrl()); }); };
+            copySakuraButton.Click += delegate
+            {
+                string remoteUrl = string.Empty;
+                RunBackgroundUiAction(delegate { remoteUrl = GetSakuraUrl(); }, "正在检查远程链接...", delegate
+                {
+                    Clipboard.SetText(remoteUrl);
+                    _detailsBox.Text = "远程链接已复制。" + Environment.NewLine + Environment.NewLine + remoteUrl;
+                });
+            };
             logsButton.Click += delegate { RunUiAction(delegate { _paths.Ensure(); Process.Start(_paths.RuntimeDir); }); };
             refreshButton.Click += delegate { UpdateModernStatus(); };
-            cdpButton.Click += delegate { RunUiAction(StartCodexCdp); };
+            cdpButton.Click += delegate { StartCodexCdp(); };
             _saveSakuraButton.Click += delegate { RunUiAction(SaveSakuraConfig); };
             _editSakuraButton.Click += delegate { RunUiAction(UnlockSakuraFormForEdit); };
 
@@ -729,7 +740,7 @@ namespace Codex2FrpLauncher
 
             ApplyModernResponsiveLayout(openButton, copyLocalButton, copyLanButton, copySakuraButton, cdpButton, logsButton, refreshButton);
 
-            _timer = new Timer { Interval = 4000 };
+            _timer = new System.Windows.Forms.Timer { Interval = 4000 };
             _timer.Tick += delegate { UpdateModernStatus(); };
             _timer.Start();
             Shown += delegate { EnsureReadableWindowBounds(); UpdateModernStatus(); };
@@ -1547,6 +1558,43 @@ namespace Codex2FrpLauncher
             }
         }
 
+        private void RunBackgroundUiAction(Action action, string busyMessage, Action successUiAction = null)
+        {
+            if (_busy) return;
+            SetBusy(string.IsNullOrWhiteSpace(busyMessage) ? "正在处理，请稍候..." : busyMessage);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Exception error = null;
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                }
+
+                try
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        SetBusy(string.Empty);
+                        if (error != null)
+                        {
+                            MessageBox.Show(error.Message, Program.AppDisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                        else if (successUiAction != null)
+                        {
+                            successUiAction();
+                        }
+                        UpdateModernStatus();
+                    });
+                }
+                catch { }
+            });
+        }
+
         private void BeginStartServer()
         {
             if (_busy) return;
@@ -1600,8 +1648,6 @@ namespace Codex2FrpLauncher
                 _statusLabel.Text = message;
                 _subStatusLabel.Text = "正在同步服务状态和本机路由";
                 _statusLabel.ForeColor = _accent;
-                Refresh();
-                Application.DoEvents();
             }
         }
 
@@ -1686,17 +1732,13 @@ namespace Codex2FrpLauncher
             if (string.IsNullOrWhiteSpace(route)) return false;
             try
             {
-                string status = GetLocalJson("/codex/sakura/status?refresh=1");
+                string status = GetLocalJson("/codex/sakura/status", 2500);
                 if (!Regex.IsMatch(status ?? string.Empty, "\"code\"\\s*:\\s*\"REMOTE_NETWORK_UNAVAILABLE\"", RegexOptions.IgnoreCase)) return false;
                 string key = route;
+                _lastRemoteUnavailableNoticeKey = key;
                 _detailsBox.Text =
                     Program.RemoteUnavailableMessage + Environment.NewLine + Environment.NewLine +
                     "说明：远程链接暂不可访问，请先使用局域网链接。";
-                if (!string.Equals(_lastRemoteUnavailableNoticeKey, key, StringComparison.Ordinal))
-                {
-                    _lastRemoteUnavailableNoticeKey = key;
-                    MessageBox.Show(Program.RemoteUnavailableMessage, Program.AppDisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
                 return true;
             }
             catch { return false; }
@@ -1734,13 +1776,18 @@ namespace Codex2FrpLauncher
 
         private string BuildSakuraUrlBaseFromFields()
         {
-            string domain = (_domainBox.Text ?? string.Empty).Trim();
+            return BuildSakuraUrlBaseFromValues(_domainBox.Text, _remotePortBox.Text);
+        }
+
+        private static string BuildSakuraUrlBaseFromValues(string domainValue, string remotePortValue)
+        {
+            string domain = (domainValue ?? string.Empty).Trim();
             if (domain.Length == 0) return string.Empty;
             string baseUrl = domain.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || domain.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
                 ? domain.TrimEnd('/')
                 : "https://" + domain.TrimEnd('/');
             int port;
-            if (int.TryParse((_remotePortBox.Text ?? string.Empty).Trim(), out port) && port > 0 && port <= 65535)
+            if (int.TryParse((remotePortValue ?? string.Empty).Trim(), out port) && port > 0 && port <= 65535)
             {
                 var builder = new UriBuilder(baseUrl);
                 if (builder.Port == 80 || builder.Port == 443 || builder.Port == -1) builder.Port = port;
@@ -1978,7 +2025,6 @@ namespace Codex2FrpLauncher
 
         private void StartCodexCdp()
         {
-            EnsureServerRunning();
             DialogResult answer = MessageBox.Show(
                 this,
                 "启用 Codex 控制会强制关闭当前所有 Codex 客户端窗口，然后重新启动一个支持 CDP 控制的 Codex 客户端。\r\n\r\n请先确认当前 Codex 中没有正在进行的重要任务、未保存输入或关键输出。是否继续？",
@@ -1989,11 +2035,18 @@ namespace Codex2FrpLauncher
             );
             if (answer != DialogResult.OK) return;
 
-            string result = PostLocalJson("/codex/control-port", "{\"autoOpen\":true,\"forceRestart\":true,\"allowIsolatedProfile\":false}");
-            _detailsBox.Text =
-                "Codex 控制已启用。\r\n\r\n" +
-                "后端已重启为单一 CDP Codex 客户端。后续模型、思考强度、速度和发送操作都会在这个客户端窗口中完成，不会再为调节操作另开 Codex。\r\n\r\n" +
-                result;
+            string result = string.Empty;
+            RunBackgroundUiAction(delegate
+            {
+                EnsureServerRunning();
+                result = PostLocalJson("/codex/control-port", "{\"autoOpen\":true,\"forceRestart\":true,\"allowIsolatedProfile\":false}");
+            }, "正在启用 Codex 控制，请稍候...", delegate
+            {
+                _detailsBox.Text =
+                    "Codex 控制已启用。\r\n\r\n" +
+                    "后端已重启为单一 CDP Codex 客户端。后续模型、思考强度、速度和发送操作都会在这个客户端窗口中完成，不会再为调节操作另开 Codex。\r\n\r\n" +
+                    result;
+            });
         }
 
         private void CheckCodexControlAfterStartup()
@@ -2106,10 +2159,15 @@ namespace Codex2FrpLauncher
 
         private string GetLocalJson(string path)
         {
+            return GetLocalJson(path, 12000);
+        }
+
+        private string GetLocalJson(string path, int timeoutMs)
+        {
             var request = (HttpWebRequest)WebRequest.Create(LocalApiUrl(path));
             request.Method = "GET";
-            request.Timeout = 12000;
-            request.ReadWriteTimeout = 12000;
+            request.Timeout = timeoutMs;
+            request.ReadWriteTimeout = timeoutMs;
             using (var response = (HttpWebResponse)request.GetResponse())
             using (var reader = new StreamReader(response.GetResponseStream() ?? Stream.Null, Encoding.UTF8))
             {
@@ -2124,41 +2182,147 @@ namespace Codex2FrpLauncher
             return "http://127.0.0.1:" + Program.ServicePortDisplay + cleanPath + separator + "token=" + Uri.EscapeDataString(_paths.GetOrCreateMobileToken());
         }
 
+        private sealed class StatusRefreshRequest
+        {
+            public string Domain = "";
+            public string RemotePort = "";
+            public bool SakuraFormEditMode;
+        }
+
+        private sealed class StatusSnapshot
+        {
+            public bool Running;
+            public int ProcessId;
+            public string LocalUrl = "";
+            public string CachedDomain = "";
+            public string CachedRemotePort = "";
+            public bool HasCachedSakura;
+            public bool RemoteUnavailable;
+            public string RemoteUnavailableKey = "";
+            public string Details = "";
+            public string Error = "";
+        }
+
         private void UpdateModernStatus()
         {
             if (_busy) return;
-            Process process = GetServerProcess();
-            _urlBox.Text = GetLocalUrl();
-            bool running = process != null;
-            if (running) LoadSakuraCachedForm();
-            ApplySakuraFormLockState(running);
-            _activityBar.Visible = false;
-            UseWaitCursor = false;
-            _statusLabel.Text = running ? "服务运行中" : "服务已停止";
-            _statusLabel.ForeColor = running ? _accent : _danger;
-            _subStatusLabel.Text = running ? "PID " + process.Id + " · 端口 " + Program.ServicePortDisplay : "点击“启动服务”后再从手机访问";
-            _startButton.Enabled = !running;
-            _stopButton.Enabled = running;
-            _startButton.BackColor = running ? Color.FromArgb(28, 30, 31) : _accentDeep;
-            _startButton.ForeColor = running ? _muted : _accent;
-            _stopButton.BackColor = running ? Color.FromArgb(34, 26, 28) : Color.FromArgb(28, 30, 31);
-            _stopButton.ForeColor = running ? Color.FromArgb(255, 188, 198) : _muted;
+            QueueStatusRefresh();
+        }
 
-            if (CheckRemoteUnavailableNotice(running)) return;
+        private void QueueStatusRefresh()
+        {
+            if (Interlocked.CompareExchange(ref _statusRefreshInFlight, 1, 0) != 0)
+            {
+                Interlocked.Exchange(ref _statusRefreshAgain, 1);
+                return;
+            }
+
+            var request = new StatusRefreshRequest
+            {
+                Domain = _domainBox.Text ?? string.Empty,
+                RemotePort = _remotePortBox.Text ?? string.Empty,
+                SakuraFormEditMode = _sakuraFormEditMode
+            };
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                StatusSnapshot snapshot;
+                try
+                {
+                    snapshot = BuildStatusSnapshot(request);
+                }
+                catch (Exception ex)
+                {
+                    snapshot = new StatusSnapshot
+                    {
+                        LocalUrl = GetLocalUrl(),
+                        Details = "状态刷新失败：" + ex.Message,
+                        Error = ex.Message
+                    };
+                }
+
+                try
+                {
+                    if (!IsDisposed && IsHandleCreated)
+                    {
+                        BeginInvoke((MethodInvoker)delegate
+                        {
+                            Interlocked.Exchange(ref _statusRefreshInFlight, 0);
+                            if (!_busy) ApplyStatusSnapshot(snapshot);
+                            if (Interlocked.Exchange(ref _statusRefreshAgain, 0) == 1) UpdateModernStatus();
+                        });
+                        return;
+                    }
+                }
+                catch { }
+
+                Interlocked.Exchange(ref _statusRefreshInFlight, 0);
+            });
+        }
+
+        private StatusSnapshot BuildStatusSnapshot(StatusRefreshRequest request)
+        {
+            var snapshot = new StatusSnapshot();
+            string token = _paths.GetOrCreateMobileToken();
+            snapshot.LocalUrl = GetLocalUrl();
+            Process process = GetServerProcess();
+            snapshot.Running = process != null;
+            snapshot.ProcessId = process == null ? 0 : process.Id;
+
+            string sakuraStatus = string.Empty;
+            if (snapshot.Running && !request.SakuraFormEditMode)
+            {
+                try
+                {
+                    sakuraStatus = GetLocalJson("/codex/sakura/status", 2500);
+                    string domain = ExtractJsonString(sakuraStatus, "preferredDomain");
+                    string remotePort = ExtractJsonNumber(sakuraStatus, "remotePort");
+                    if (!string.IsNullOrWhiteSpace(domain) || !string.IsNullOrWhiteSpace(remotePort))
+                    {
+                        snapshot.CachedDomain = domain;
+                        snapshot.CachedRemotePort = remotePort;
+                        snapshot.HasCachedSakura = true;
+                    }
+                }
+                catch { }
+            }
+
+            string effectiveDomain = snapshot.HasCachedSakura && !string.IsNullOrWhiteSpace(snapshot.CachedDomain)
+                ? snapshot.CachedDomain
+                : request.Domain;
+            string effectiveRemotePort = snapshot.HasCachedSakura && !string.IsNullOrWhiteSpace(snapshot.CachedRemotePort)
+                ? snapshot.CachedRemotePort
+                : request.RemotePort;
+            string route = BuildSakuraUrlBaseFromValues(effectiveDomain, effectiveRemotePort);
+            if (snapshot.Running && !string.IsNullOrWhiteSpace(route) &&
+                Regex.IsMatch(sakuraStatus ?? string.Empty, "\"code\"\\s*:\\s*\"REMOTE_NETWORK_UNAVAILABLE\"", RegexOptions.IgnoreCase))
+            {
+                snapshot.RemoteUnavailable = true;
+                snapshot.RemoteUnavailableKey = route;
+            }
 
             var lines = new StringBuilder();
-            lines.AppendLine("本机链接: " + GetLocalUrl());
+            if (snapshot.RemoteUnavailable)
+            {
+                lines.AppendLine(Program.RemoteUnavailableMessage);
+                lines.AppendLine();
+                lines.AppendLine("说明：远程链接暂不可访问，请先使用局域网链接。");
+                snapshot.Details = lines.ToString();
+                return snapshot;
+            }
+
+            lines.AppendLine("本机链接: " + snapshot.LocalUrl);
             string lan = GetLanAddress();
             if (!string.IsNullOrEmpty(lan))
             {
-                lines.AppendLine("局域网链接: http://" + lan + ":" + Program.ServicePortDisplay + "/?token=" + Uri.EscapeDataString(_paths.GetOrCreateMobileToken()));
+                lines.AppendLine("局域网链接: http://" + lan + ":" + Program.ServicePortDisplay + "/?token=" + Uri.EscapeDataString(token));
             }
             else
             {
                 lines.AppendLine("局域网链接: 暂未发现可用的局域网 IPv4 地址");
             }
-            lines.AppendLine("远程链接: " + GetSakuraUrlPreview());
-            lines.AppendLine("服务状态: " + (running ? "运行中" : "未运行"));
+            lines.AppendLine("远程链接: " + AppendToken(route));
+            lines.AppendLine("服务状态: " + (snapshot.Running ? "运行中" : "未运行"));
             lines.AppendLine("安装目录: " + _paths.ProjectRoot);
             lines.AppendLine();
             lines.AppendLine("日志:");
@@ -2171,7 +2335,33 @@ namespace Codex2FrpLauncher
                 lines.AppendLine("错误日志:");
                 lines.AppendLine(errors);
             }
-            _detailsBox.Text = lines.ToString();
+            snapshot.Details = lines.ToString();
+            return snapshot;
+        }
+
+        private void ApplyStatusSnapshot(StatusSnapshot snapshot)
+        {
+            _urlBox.Text = snapshot.LocalUrl;
+            if (snapshot.HasCachedSakura && !_sakuraFormEditMode)
+            {
+                if (!string.IsNullOrWhiteSpace(snapshot.CachedDomain)) _domainBox.Text = snapshot.CachedDomain;
+                if (!string.IsNullOrWhiteSpace(snapshot.CachedRemotePort)) _remotePortBox.Text = snapshot.CachedRemotePort;
+                _sakuraFormFromCache = true;
+            }
+            ApplySakuraFormLockState(snapshot.Running);
+            _activityBar.Visible = false;
+            UseWaitCursor = false;
+            _statusLabel.Text = snapshot.Running ? "服务运行中" : "服务已停止";
+            _statusLabel.ForeColor = snapshot.Running ? _accent : _danger;
+            _subStatusLabel.Text = snapshot.Running ? "PID " + snapshot.ProcessId + " · 端口 " + Program.ServicePortDisplay : "点击“启动服务”后再从手机访问";
+            _startButton.Enabled = !snapshot.Running;
+            _stopButton.Enabled = snapshot.Running;
+            _startButton.BackColor = snapshot.Running ? Color.FromArgb(28, 30, 31) : _accentDeep;
+            _startButton.ForeColor = snapshot.Running ? _muted : _accent;
+            _stopButton.BackColor = snapshot.Running ? Color.FromArgb(34, 26, 28) : Color.FromArgb(28, 30, 31);
+            _stopButton.ForeColor = snapshot.Running ? Color.FromArgb(255, 188, 198) : _muted;
+            if (snapshot.RemoteUnavailable) _lastRemoteUnavailableNoticeKey = snapshot.RemoteUnavailableKey;
+            _detailsBox.Text = snapshot.Details;
         }
 
         private void UpdateStatus()

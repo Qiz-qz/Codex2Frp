@@ -91,6 +91,7 @@ const CODEX_MODEL_COMMAND_SETTLE_MS = 450;
 const CODEX_REASONING_COMMAND_SETTLE_MS = 450;
 const CODEX_SESSION_FILE_CACHE_MS = 1200;
 const CODEX_THREAD_LIST_CACHE_MS = 1200;
+const CODEX_CURRENT_THREAD_CACHE_MS = 900;
 const CODEX_HISTORY_INITIAL_TAIL_BYTES = 8 * 1024 * 1024;
 const CODEX_CDP_PREFERRED_PORT = Number(process.env.CODEX2FRP_CDP_PORT || 39252);
 const CODEX_CDP_PORT_SCAN_COUNT = Math.max(1, Number(process.env.CODEX2FRP_CDP_PORT_SCAN_COUNT || 12));
@@ -124,6 +125,7 @@ const firstUserMessageCache = new Map();
 const runtimeSummaryCache = new Map();
 const codexThreadListCache = new Map();
 const threadHistoryCache = new Map();
+let codexCurrentThreadCache = { at: 0, selection: null };
 let foregroundNoticeThreadSnapshot = [];
 let foregroundNoticeSnapshotReady = false;
 let modelCatalogCache = { mtimeMs: -1, path: '', models: null };
@@ -149,6 +151,7 @@ function boundedSet(map, key, value, limit = 300) {
 
 function invalidateCodexThreadListCache() {
   codexThreadListCache.clear();
+  codexCurrentThreadCache = { at: 0, selection: null };
 }
 
 function isKeepAwakeActive() {
@@ -845,6 +848,44 @@ function isCodexThreadId(value) {
   return typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9-]{27,}$/i.test(value);
 }
 
+function normalizeCodexThreadId(value) {
+  if (typeof value !== 'string') return '';
+  const match = value.trim().match(/(?:^|:)([a-f0-9]{8}-[a-f0-9-]{27,})$/i);
+  return match ? match[1] : '';
+}
+
+function normalizeCurrentThreadPreviewText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^What should we get done\?\s*/i, '')
+    .trim();
+}
+
+function currentThreadPreviewCandidates(value) {
+  const text = normalizeCurrentThreadPreviewText(value);
+  if (text.length < 48) return [];
+  const candidates = [];
+  candidates.push(text.slice(0, Math.min(140, text.length)));
+  if (text.length > 220) candidates.push(text.slice(80, Math.min(240, text.length)));
+  return candidates
+    .map(item => item.trim())
+    .filter(item => item.length >= 48);
+}
+
+function findCodexThreadIdByVisibleText(value) {
+  const candidates = currentThreadPreviewCandidates(value);
+  if (candidates.length === 0) return '';
+  for (const file of listCodexSessionFiles()) {
+    const match = path.basename(file).match(/([a-f0-9]{8}-[a-f0-9-]{27,})\.jsonl$/i);
+    if (!match) continue;
+    try {
+      const raw = fs.readFileSync(file, 'utf8').replace(/\s+/g, ' ');
+      if (candidates.some(candidate => raw.includes(candidate))) return match[1];
+    } catch {}
+  }
+  return '';
+}
+
 function codexThreadDeepLink(threadId) {
   if (!isCodexThreadId(threadId)) return null;
   // Codex desktop's own “Copy app link” action uses codex://threads/<id>.
@@ -1161,10 +1202,91 @@ function shouldIncludeCodexSessionMeta(meta, options = {}) {
   return options.includeSubagents === true || !isSubagentSessionMeta(meta);
 }
 
+function normalizeCurrentThreadSelection(value) {
+  if (!value || typeof value !== 'object') return null;
+  const preview = typeof value.preview === 'string' ? value.preview : '';
+  const threadId = normalizeCodexThreadId(value.threadId) || findCodexThreadIdByVisibleText(preview);
+  if (!threadId) return null;
+  return {
+    threadId,
+    title: typeof value.title === 'string' && value.title.trim()
+      ? value.title.trim()
+      : normalizeCurrentThreadPreviewText(preview).slice(0, 120),
+    source: typeof value.source === 'string' ? value.source : 'codex-cdp',
+    observedAt: new Date().toISOString(),
+  };
+}
+
+async function readCurrentCodexThreadSelectionViaCdp() {
+  const target = await findCodexCdpTarget({ autoOpen: false });
+  const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
+  try {
+    await client.call('Runtime.enable').catch(() => {});
+    await client.call('Page.enable').catch(() => {});
+    const selection = await cdpEvaluate(client, `(() => {
+      const threadIdPattern = /^(?:local:)?[a-f0-9]{8}-[a-f0-9-]{27,}$/i;
+      const visible = el => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 &&
+          rect.bottom >= 0 && rect.y <= innerHeight &&
+          rect.right >= 0 && rect.x <= innerWidth &&
+          style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const cleanText = value => String(value || '').replace(/\\s+/g, ' ').trim();
+      const rows = [...document.querySelectorAll('[data-app-action-sidebar-thread-id]')]
+        .filter(visible)
+        .map(el => ({
+          threadId: el.getAttribute('data-app-action-sidebar-thread-id') || '',
+          active: el.getAttribute('data-app-action-sidebar-thread-active') === 'true' ||
+            el.getAttribute('aria-current') === 'true' ||
+            el.matches('[aria-current="true"], [data-state="active"], .active, .is-active'),
+          text: cleanText(el.textContent),
+        }))
+        .filter(row => threadIdPattern.test(row.threadId));
+      const active = rows.find(row => row.active);
+      if (active) return { threadId: active.threadId, title: active.text, source: 'codex-cdp-sidebar' };
+      const urlMatch = String(location.href || '').match(/([a-f0-9]{8}-[a-f0-9-]{27,})/i);
+      if (urlMatch && threadIdPattern.test(urlMatch[1])) {
+        return { threadId: urlMatch[1], title: document.title || '', source: 'codex-cdp-location' };
+      }
+      const mainText = cleanText((document.querySelector('main') || document.body || {}).innerText || '');
+      if (mainText.length > 0) {
+        return { preview: mainText.slice(0, 2200), source: 'codex-cdp-main' };
+      }
+      return null;
+    })()`);
+    return normalizeCurrentThreadSelection(selection);
+  } finally {
+    client.close();
+  }
+}
+
+async function readCurrentCodexThreadSelection(options = {}) {
+  const now = Date.now();
+  if (
+    options.force !== true &&
+    codexCurrentThreadCache.selection &&
+    now - codexCurrentThreadCache.at <= CODEX_CURRENT_THREAD_CACHE_MS
+  ) {
+    return codexCurrentThreadCache.selection;
+  }
+
+  try {
+    const selection = await readCurrentCodexThreadSelectionViaCdp();
+    codexCurrentThreadCache = { at: now, selection };
+    return selection;
+  } catch {
+    codexCurrentThreadCache = { at: now, selection: null };
+    return null;
+  }
+}
+
 function listCodexThreads(limit = 500, options = {}) {
   const normalizedLimit = normalizeThreadListLimit(limit);
   const includeSubagents = options.includeSubagents === true;
-  const cacheKey = `${normalizedLimit}:${includeSubagents ? 'with-subagents' : 'user-only'}`;
+  const includeThreadId = normalizeCodexThreadId(options.includeThreadId);
+  const cacheKey = `${normalizedLimit}:${includeSubagents ? 'with-subagents' : 'user-only'}:${includeThreadId}`;
   const cached = codexThreadListCache.get(cacheKey);
   if (cached && Date.now() - cached.at <= CODEX_THREAD_LIST_CACHE_MS) return cached.threads;
   const miniState = readAppState();
@@ -1214,25 +1336,42 @@ function listCodexThreads(limit = 500, options = {}) {
       byId.set(id, existing);
     } catch {}
   }
-  const threads = [...byId.values()]
+  const sortedThreads = [...byId.values()]
     .filter(item => item.sessionFile && !archivedThreadIds.has(item.id))
     .map(item => {
       const effectiveUpdatedMs = item.effectiveUpdatedMs || Math.max(Date.parse(item.updatedAt) || 0, item.mtimeMs || 0);
       return { ...item, effectiveUpdatedMs, effectiveUpdatedAt: new Date(effectiveUpdatedMs).toISOString() };
     })
-    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.effectiveUpdatedMs - a.effectiveUpdatedMs)
-    .slice(0, normalizedLimit);
+    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.effectiveUpdatedMs - a.effectiveUpdatedMs);
+  const threads = sortedThreads.slice(0, normalizedLimit);
+  if (includeThreadId && !threads.some(item => item.id === includeThreadId)) {
+    const selected = sortedThreads.find(item => item.id === includeThreadId);
+    if (selected) {
+      if (threads.length >= normalizedLimit && threads.length > 0) threads[threads.length - 1] = selected;
+      else threads.push(selected);
+    }
+  }
   boundedSet(codexThreadListCache, cacheKey, { at: Date.now(), threads }, 20);
   return threads;
 }
 
-function handleThreads(req, res) {
+async function handleThreads(req, res) {
   if (!isAuthorized(req)) return json(res, 401, { ok: false, code: 'UNAUTHORIZED', message: '访问令牌不正确。' });
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (url.searchParams.get('refresh') === '1') invalidateCodexThreadListCache();
+  const forceRefresh = url.searchParams.get('refresh') === '1';
+  if (forceRefresh) invalidateCodexThreadListCache();
   const limit = normalizeThreadListLimit(url.searchParams.get('limit'));
   const includeSubagents = url.searchParams.get('includeSubagents') === '1';
-  return json(res, 200, { ok: true, threads: listCodexThreads(limit, { includeSubagents }) });
+  const currentThread = await readCurrentCodexThreadSelection({ force: forceRefresh });
+  const selectedThreadId = currentThread && currentThread.threadId ? currentThread.threadId : '';
+  const threads = listCodexThreads(limit, { includeSubagents, includeThreadId: selectedThreadId });
+  return json(res, 200, {
+    ok: true,
+    selectedThreadId,
+    currentThreadId: selectedThreadId,
+    currentThread,
+    threads,
+  });
 }
 
 function compactForegroundThreadSnapshot(thread) {
@@ -5315,9 +5454,13 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
           bottom: Math.round(rect.bottom),
         };
       };
+      const normalizeThreadId = value => {
+        const match = String(value || '').trim().match(/(?:^|:)([a-f0-9]{8}-[a-f0-9-]{27,})$/i);
+        return match ? match[1] : '';
+      };
       const row = [...document.querySelectorAll('[data-app-action-sidebar-thread-id]')]
         .filter(visible)
-        .find(el => el.getAttribute('data-app-action-sidebar-thread-id') === threadId);
+        .find(el => normalizeThreadId(el.getAttribute('data-app-action-sidebar-thread-id')) === threadId);
       if (!row) return null;
       return {
         text: (row.textContent || '').replace(/\\s+/g, ' ').trim(),
