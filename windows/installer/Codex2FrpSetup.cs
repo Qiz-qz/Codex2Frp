@@ -116,6 +116,8 @@ namespace Codex2FrpSetup
             Report(progress, "正在准备安装…", 0);
             Directory.CreateDirectory(options.InstallDir);
 
+            bool restoreRunningService = IsInstalledBackendRunning(options.InstallDir);
+
             Report(progress, "正在停止正在运行的旧版本…", -1);
             StopInstalledCodex2FrpProcesses(options.InstallDir);
             WaitForInstalledLauncherUnlock(options.InstallDir);
@@ -161,6 +163,12 @@ namespace Codex2FrpSetup
 
                 Report(progress, "正在注册卸载信息…", 98);
                 RegisterUninstall(options.InstallDir, exePath, installedBytes);
+
+                if (restoreRunningService)
+                {
+                    Report(progress, "正在恢复后台服务…", 99);
+                    StartInstalledBackendService(exePath, options.InstallDir);
+                }
 
                 Report(progress, "安装完成", 100);
             }
@@ -301,6 +309,63 @@ namespace Codex2FrpSetup
                 }
             }
             StopCodex2FrpPortOwners(Program.ServicePort);
+        }
+
+        private static bool IsInstalledBackendRunning(string installDir)
+        {
+            string fullInstallDir = Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            foreach (int pid in GetTcpListeningProcessIds(Program.ServicePort))
+            {
+                try
+                {
+                    Process process = Process.GetProcessById(pid);
+                    if (process.HasExited || !CouldBeCodex2FrpProcess(process.ProcessName)) continue;
+                    string commandLine = GetCommandLine(process);
+                    string executable = string.Empty;
+                    try { executable = process.MainModule == null ? string.Empty : process.MainModule.FileName; } catch { }
+                    string haystack = (executable + "\n" + commandLine).Replace('/', '\\');
+                    if (haystack.IndexOf(fullInstallDir.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (IsCodex2FrpProcess(process.ProcessName, commandLine, executable)) return true;
+                }
+                catch
+                {
+                }
+            }
+            return false;
+        }
+
+        private static void StartInstalledBackendService(string exePath, string installDir)
+        {
+            var info = new ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = "--silent --start-service",
+                WorkingDirectory = installDir,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            using (Process process = Process.Start(info))
+            {
+                if (process == null) throw new InvalidOperationException("The installed backend launcher did not start.");
+                if (!process.WaitForExit(15000))
+                {
+                    try { process.Kill(); } catch { }
+                    throw new TimeoutException("The installed backend launcher did not finish starting the service.");
+                }
+                if (process.ExitCode != 0)
+                {
+                    throw new InvalidOperationException("The installed backend launcher could not restore the service.");
+                }
+            }
+
+            DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (IsInstalledBackendRunning(installDir)) return;
+                Thread.Sleep(250);
+            }
+            throw new TimeoutException("The installed backend service did not resume after the upgrade.");
         }
 
         private static void WaitForInstalledLauncherUnlock(string installDir)
@@ -918,6 +983,7 @@ namespace Codex2FrpSetup
                 if (arg.Equals("--silent", StringComparison.OrdinalIgnoreCase))
                 {
                     options.Silent = true;
+                    options.LaunchAfterInstall = false;
                     continue;
                 }
                 if (arg.Equals("--no-launch", StringComparison.OrdinalIgnoreCase))

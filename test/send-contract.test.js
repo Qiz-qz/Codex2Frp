@@ -180,10 +180,11 @@ test('composer plus lookup is anchored to the editor instead of sidebar buttons'
   assert.match(serverSource, /function findCodexSidebarButton/, 'sidebar actions have a dedicated selector');
 });
 
-test('CDP target discovery prefers the main Codex window over overlay pages', () => {
+test('CDP target discovery delegates to the strict unambiguous Codex selector', () => {
   const probeBody = functionBody('probeCodexCdpTarget');
-  assert.match(probeBody, /item\.url === 'app:\/\/-\/index\.html'/, 'target discovery first accepts the exact main Codex window URL');
-  assert.match(probeBody, /!String\(item\.url \|\| ''\)\.includes\('initialRoute='/, 'target discovery avoids avatar-overlay routes before falling back');
+  assert.match(serverSource, /selectCodexCdpTarget/, 'server imports the strict selector');
+  assert.match(probeBody, /selectCodexCdpTarget\(pages\)/, 'target discovery rejects overlays and ambiguous pages through the shared selector');
+  assert.doesNotMatch(probeBody, /pages\.find/, 'target discovery never falls back to an arbitrary page');
 });
 
 test('composer plus menu item selection is confined to the opened plus menu', () => {
@@ -359,14 +360,14 @@ test('speed switch uses the Codex submenu and never submits commands as tasks', 
 test('config and status expose complete Codex client state for mobile', () => {
   const configBody = functionBody('handleClientConfig');
   const handleStatusBody = functionBody('handleCodexStatus');
-  const controlPortBody = functionBody('handleControlPort');
+  const controlPortResolverBody = functionBody('resolveControlPortState');
   assert.match(configBody, /reasoningOptions/, 'config exposes reasoning choices to the App');
   assert.match(configBody, /speedOptions/, 'config exposes speed choices to the App');
-  assert.match(configBody, /refreshModes/, 'config refreshes live menu choices only when explicitly requested');
+  assert.doesNotMatch(configBody, /refreshModes|readLiveCodexModeOptionsBounded/, 'config reads never escalate into focus-changing menu automation');
   assert.match(configBody, /cachedLiveModeOptions/, 'ordinary config reads use cached menu choices');
   assert.match(handleStatusBody, /cachedLiveModeOptions/, 'status polling uses cached menu choices');
   assert.doesNotMatch(handleStatusBody, /await\s+readLiveCodexModeOptions/, 'status polling must not open Codex mode menus');
-  assert.match(controlPortBody, /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'explicit control-port setup refreshes live menu choices without blocking indefinitely');
+  assert.match(controlPortResolverBody, /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'explicit control-port setup refreshes live menu choices without blocking indefinitely');
 
   const catalogBody = functionBody('readModelCatalogOptions');
   assert.match(catalogBody, /models_cache\.json/, 'model options fall back to Codex desktop models_cache.json');
@@ -406,7 +407,7 @@ test('manual control-port enablement force-restarts Codex into one controlled cl
   assert.match(functionBody('runCodexCdpLauncher'), /reused:\s*true/, 'launcher reports an existing ready CDP process as reused');
   assert.match(functionBody('runCodexCdpLauncher'), /CODEX_CDP_EXISTING_UNREADY/, 'launcher refuses to open a second Codex when an existing CDP process is still starting or unhealthy');
   assert.match(functionBody('ensureCodexCdpReady'), /launched:\s*launch\.launched !== false/, 'control-port response distinguishes reused clients from newly opened clients');
-  assert.match(functionBody('handleControlPort'), /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'manual enablement does not block indefinitely on menu discovery');
+  assert.match(functionBody('resolveControlPortState'), /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'manual enablement does not block indefinitely on menu discovery');
   assert.match(serverSource, /CODEX_MODE_OPTIONS_REFRESH_TIMEOUT_MS/, 'live mode menu refresh has a bounded timeout');
 
   const startBody = launcherSource.slice(launcherSource.indexOf('private void StartCodexCdp()'));
@@ -465,17 +466,19 @@ test('process image tool calls carry renderable attachment URLs for mobile', () 
   assert.match(functionBody('stepFromEvent'), /attachments:\s*summary\.attachments/, 'process steps keep image attachments alongside compact summaries');
   assert.match(serverSource, /function enrichStatusAttachments/, 'live status enriches process step attachments with mobile-accessible URLs');
   assert.match(functionBody('handleCodexStatus'), /enrichStatusAttachments\(parseCodexStatus/, 'status responses return renderable process image URLs');
-  assert.match(functionBody('enrichHistoryAttachments'), /processSteps[\s\S]*enrichAttachmentList/, 'history progress cards enrich nested process image attachments');
+  assert.match(functionBody('enrichHistoryAttachments'), /enrichHistoryTurn/, 'history recursively enriches structured turn attachments');
   assert.match(serverSource, /function attachmentFilePath/, 'attachment enrichment can recover the original file path from older attachment URLs');
   assert.match(serverSource, /function inlineAttachmentDataUrl/, 'small local image attachments include a data URL fallback for native mobile Image rendering');
   assert.match(serverSource, /INLINE_ATTACHMENT_BYTES/, 'inline image data is capped to avoid unbounded status responses');
-  assert.match(functionBody('enrichAttachmentList'), /url:\s*attachmentUrlFor\(req,\s*filePath\)/, 'attachment URLs are rewritten to the current request route for mobile clients');
+  assert.match(functionBody('enrichAttachmentList'), /registerOutputAttachment\(filePath\)/, 'local output images are registered behind opaque capabilities');
+  assert.match(functionBody('enrichAttachmentList'), /\/codex\/attachment\/\$\{registered\.handle\}/, 'attachment URLs expose only an opaque handle on the current request route');
+  assert.doesNotMatch(functionBody('enrichAttachmentList'), /searchParams\.set\(['"](?:path|token)/, 'attachment URLs never expose local paths or access tokens');
   assert.match(serverSource, /function enrichAttachmentList\(attachments,\s*req,\s*options = \{\}\)/, 'attachment enrichment can tune payload size per endpoint');
   assert.match(functionBody('enrichAttachmentList'), /const inlineData = options\.inlineData !== false/, 'attachment enrichment keeps inline image fallback enabled by default');
-  assert.match(functionBody('enrichAttachmentList'), /dataUrl:\s*inlineData \? \(attachment\.dataUrl \|\| inlineAttachmentDataUrl/, 'enriched attachments expose inline image data only when the endpoint allows it');
+  assert.match(functionBody('enrichAttachmentList'), /inlineData \? \{ dataUrl: inlineAttachmentDataUrl/, 'enriched local attachments expose inline image data only when the endpoint allows it');
   assert.match(functionBody('enrichStatusAttachments'), /enrichAttachmentList\(step\.attachments,\s*req,\s*\{\s*inlineData:\s*false\s*\}\)/, 'live status process images avoid base64 inlining during frequent polling');
-  assert.match(functionBody('enrichHistoryAttachments'), /enrichAttachmentList\(message\.attachments,\s*req,\s*\{\s*inlineData:\s*false\s*\}\)/, 'history top-level attachments avoid base64 inlining on long threads');
-  assert.match(functionBody('enrichHistoryAttachments'), /enrichAttachmentList\(step\.attachments,\s*req,\s*\{\s*inlineData:\s*false\s*\}\)/, 'history process images avoid base64 inlining on long threads');
+  assert.match(functionBody('enrichHistoryMessage'), /enrichAttachmentList\(next\.attachments,\s*req,\s*\{\s*inlineData:\s*false\s*\}\)/, 'history message attachments avoid base64 inlining on long threads');
+  assert.match(functionBody('enrichHistoryTurn'), /activities[\s\S]*detailActivities[\s\S]*enrichAttachmentList/, 'history process activities recursively enrich image attachments');
   assert.doesNotMatch(functionBody('enrichAttachmentList'), /url:\s*attachment\.url\s*\|\|/, 'stale localhost attachment URLs are not preserved');
   assert.match(serverSource, /function localImageFileExists/, 'local image attachments are validated before exposing them to mobile clients');
   assert.match(functionBody('imageAttachmentFromSource'), /if\s*\(!localImageFileExists\(source\)\)\s*return null/, 'image parsing does not treat whole shell commands ending in image paths as attachments');
@@ -525,12 +528,14 @@ test('history responses include completed process cards with stable fold metadat
   assert.match(historyBody, /kind:\s*'progress'/, 'history emits progress messages for completed turns');
   assert.match(historyBody, /processCollapsed:\s*true/, 'completed history progress is collapsed by default');
   assert.match(historyBody, /progressMessageIdForTurn/, 'history progress ids match live progress ids');
-  assert.match(historyBody, /isProcessEchoMessage\(lastMessage,\s*currentTurn\.steps/, 'task_complete commentary echoes are not promoted to final replies');
+  assert.doesNotMatch(historyBody, /last_agent_message/, 'task_complete commentary or child-agent echoes are never promoted to final replies');
   assert.match(handleHistoryBody, /invalidateCodexThreadListCache/, 'history refresh invalidates stale thread-list runtime cache');
   assert.match(serverSource, /const threadHistoryCache = new Map\(\)/, 'backend caches parsed history by session file signature');
   assert.match(historyBody, /fileCacheSignature\(fileStat\)/, 'history cache key follows the JSONL file size and mtime');
   assert.match(historyBody, /threadHistoryCache\.has\(cacheKey\)/, 'unchanged long histories are served from cache instead of reparsed');
   assert.match(historyBody, /boundedSet\(threadHistoryCache/, 'parsed history cache is bounded');
+  assert.match(historyBody, /createSessionNormalizer/, 'history builds structured activity only through the privacy normalizer');
+  assert.match(historyBody, /turns:\s*buildTurnViews/, 'history exposes stable structured turns for the mobile process card');
 });
 
 test('in-task user guidance stays as user history without splitting the active process turn', () => {
@@ -612,6 +617,11 @@ test('mode menu selection follows Codex nested model and speed menus', () => {
   assert.match(closeBody, /assertCodexCdpIdleForControlAction/, 'closing Codex menus refuses to press Escape while a response is running');
   assert.match(functionBody('assertCodexCdpIdleForControlAction'), /CODEX_CONTROL_UNAVAILABLE_WHILE_RUNNING/, 'running-state guard reports a clear non-stop-control error instead of interrupting Codex');
   assert.doesNotMatch(helperBody, /dispatchEvent\(new PointerEvent|dispatchEvent\(new MouseEvent/, 'mode menu selection does not rely on synthetic DOM mouse events');
+});
+
+test('legacy history and status never expose task_complete last_agent_message fallbacks', () => {
+  assert.doesNotMatch(functionBody('parseCodexThreadHistory'), /last_agent_message/, 'history accepts final answers only from main-thread final message items');
+  assert.doesNotMatch(functionBody('parseCodexStatus'), /last_agent_message/, 'status never treats aggregated child-agent output as the main final answer');
 });
 
 test('model, reasoning, and speed switches fall back to config while Codex is running or minimized', () => {

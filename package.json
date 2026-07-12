@@ -2,7 +2,8 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js",
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/run-tests.js",
+    "test:integration": "node --test test/server-sakura-config.test.js test/integration/*.test.js",
     "test:smoke": "node --test test/smoke-server.test.js",
     "test:routes": "node --test test/route-utils.test.js",
     "windows:cdp": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-main-codex-cdp.ps1 -OpenAfterPrepare",
@@ -18,7 +19,7 @@
   },
   "private": true,
   "name": "codex2frp",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Windows local Codex bridge with remote-link access",
   "license": "SEE LICENSE IN LICENSE"
 }

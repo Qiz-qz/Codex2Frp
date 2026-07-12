@@ -114,6 +114,32 @@ test('launcher accepts an already healthy installed backend even if the pid is s
   assert.match(processBody, /WaitForServerHealth\(token,\s*800\)/, 'status refresh can verify a server even when server.pid is missing');
   assert.match(processBody, /Program\.GetTcpListeningProcessIds\(Program\.ServicePort\)/, 'status refresh can recover the real PID from the listening port');
   assert.match(processBody, /File\.WriteAllText\(_paths\.PidPath,\s*process\.Id\.ToString\(\)/, 'recovered healthy server PID is written back for later refreshes');
+  assert.match(processBody, /Program\.IsOwnedBackendProcess\(process,\s*_paths\.ProjectRoot\)/, 'a stale pid is trusted only when it still belongs to this installed backend');
+});
+
+test('silent installer never launches a control-panel window', () => {
+  const parseBody = bodyAfterIn(setupSource, 'public static InstallOptions Parse(string[] args)');
+  const silentBranch = parseBody.slice(parseBody.indexOf('arg.Equals("--silent"'), parseBody.indexOf('arg.Equals("--no-launch"'));
+  assert.match(silentBranch, /options\.Silent\s*=\s*true/, 'silent mode is recorded');
+  assert.match(silentBranch, /options\.LaunchAfterInstall\s*=\s*false/, 'silent install suppresses the post-install window by default');
+});
+
+test('installer restores an already-running backend after upgrade without opening its control panel', () => {
+  assert.match(
+    setupSource,
+    /bool restoreRunningService = IsInstalledBackendRunning\(options\.InstallDir\);/,
+    'installer should remember whether the installed backend was running before replacement'
+  );
+  assert.match(
+    setupSource,
+    /if \(restoreRunningService\)\s*\{[\s\S]*?StartInstalledBackendService\(exePath, options\.InstallDir\);\s*\}/,
+    'an active backend should be restored after payload extraction'
+  );
+  const startMatch = setupSource.match(/private static void StartInstalledBackendService\(string exePath, string installDir\)([\s\S]*?)\r?\n\s*}\r?\n\r?\n\s*private static/);
+  assert.ok(startMatch, 'installer should have a dedicated background service restart helper');
+  assert.match(startMatch[1], /Arguments = "--silent --start-service"/, 'restart must use the launcher service-only command');
+  assert.match(startMatch[1], /UseShellExecute = false/, 'restart must not invoke the desktop shell');
+  assert.match(startMatch[1], /CreateNoWindow = true/, 'restart must not open a control-panel window');
 });
 
 test('status refresh does not synchronously query backend config for Sakura preview', () => {

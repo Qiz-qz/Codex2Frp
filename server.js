@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { spawn } = require('child_process');
 const { URL } = require('url');
 const {
@@ -29,6 +30,42 @@ const {
   normalizeThreadListLimit,
 } = require('./lib/thread-utils');
 const modelOptionUtils = require('./lib/model-options');
+const { isAuthorizedRequest } = require('./lib/security/auth');
+const { selectCodexCdpTarget } = require('./lib/windows/cdp-target');
+const { V3ApiRouter } = require('./lib/api/v3-router');
+const {
+  detectCodexCliVersion,
+  discoverCodexExecutable,
+  profileFileForCliVersion,
+} = require('./lib/app-server/discovery');
+const { AppServerProcessManager } = require('./lib/app-server/process-manager');
+const { AppServerRuntime } = require('./lib/app-server/runtime');
+const { PendingRequestStore } = require('./lib/app-server/pending-request-store');
+const { loadSchemaProfile } = require('./lib/app-server/schema-profile');
+const { CommandCoordinator } = require('./lib/control/command-coordinator');
+const {
+  ThreadProtectionRegistry,
+  createDynamicProtectedThreadGuard,
+} = require('./lib/control/dynamic-thread-protection');
+const {
+  ExplicitProcessControlTransaction,
+  UiActionTransaction,
+  attachProcessControlReplacement,
+  createExplicitUiIntent,
+} = require('./lib/control/ui-action-transaction');
+const { Win32FocusAdapter } = require('./lib/windows/win32-focus-adapter');
+const { AttachmentStore } = require('./lib/attachments/attachment-store');
+const { createProductionQueueStore } = require('./lib/queue/queue-store');
+const { TurnInputQueue } = require('./lib/queue/turn-input-queue');
+const { redactDiagnosticString } = require('./lib/diagnostics/diagnostic-report');
+const { parseUserMessageEnvelope } = require('./lib/events/user-message-envelope');
+const { createSessionNormalizer } = require('./lib/events/session-normalizer');
+const { buildTurnViews } = require('./lib/events/turn-view-builder');
+const {
+  ProductionEventRuntime,
+  createSessionResolver,
+} = require('./lib/events/production-event-runtime');
+const packageInfo = require('./package.json');
 
 const APP_NAME = process.env.CODEX2FRP_APP_NAME || 'Codex2Frp';
 const PORT = Number(process.env.PORT || 8988);
@@ -40,13 +77,25 @@ const MAX_BODY_BYTES = Number(process.env.CODEX2FRP_MAX_BODY_BYTES || 28 * 1024 
 const MAX_TEXT_LENGTH = 8000;
 const MAX_ATTACHMENTS = 6;
 const MAX_ATTACHMENT_BYTES = Number(process.env.CODEX2FRP_MAX_ATTACHMENT_BYTES || 8 * 1024 * 1024);
+const MAX_TOTAL_ATTACHMENT_BYTES = Number(
+  process.env.CODEX2FRP_MAX_TOTAL_ATTACHMENT_BYTES || 20 * 1024 * 1024,
+);
 const INLINE_ATTACHMENT_BYTES = Number(process.env.CODEX2FRP_INLINE_ATTACHMENT_BYTES || 512 * 1024);
 const UPLOAD_DIR = path.join(os.tmpdir(), 'codex2frp-uploads');
 const DEFAULT_STATE_DIR = path.join(os.homedir(), '.codex2frp');
 const STATE_DIR = process.env.CODEX2FRP_STATE_DIR || DEFAULT_STATE_DIR;
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
+const TURN_INPUT_QUEUE_FILE = path.join(STATE_DIR, 'turn-input-queue.json');
+const ATTACHMENT_STORE_DIR = path.join(STATE_DIR, 'attachments');
+const PROTECTED_THREADS_FILE = path.join(STATE_DIR, 'protected-threads.json');
 let sakuraRouteCache = { at: 0, result: null };
 const inlineAttachmentCache = new Map();
+const outputAttachmentCapabilities = new Map();
+const outputAttachmentHandleBySignature = new Map();
+const OUTPUT_ATTACHMENT_TTL_MS = Number(process.env.CODEX2FRP_OUTPUT_ATTACHMENT_TTL_MS || 24 * 60 * 60 * 1000);
+const MAX_OUTPUT_ATTACHMENT_BYTES = Number(process.env.CODEX2FRP_MAX_OUTPUT_ATTACHMENT_BYTES || 20 * 1024 * 1024);
+const OUTPUT_ATTACHMENT_HANDLE_PATTERN = /^[A-Za-z0-9_-]{32}$/;
+const outputAttachmentCapabilityKey = crypto.randomBytes(32);
 const SAKURA_ROUTE_CACHE_MS = Number(process.env.CODEX2FRP_SAKURA_CACHE_MS || 30 * 1000);
 const SAKURA_STATUS_MAX_AGE_MS = Number(process.env.CODEX2FRP_SAKURA_STATUS_MAX_AGE_MS || 2 * 60 * 1000);
 const SAKURA_HEALTH_TIMEOUT_MS = Number(process.env.CODEX2FRP_SAKURA_HEALTH_TIMEOUT_MS || 2500);
@@ -82,6 +131,9 @@ const GUI_FAILURE_LOG_SCAN_BYTES = 2 * 1024 * 1024;
 const GUI_FAILURE_LOG_RECENT_MS = 15 * 60 * 1000;
 const RECENT_SEND_TTL_MS = 5 * 60 * 1000;
 const CODEX_THREAD_SYNC_FRESH_MS = 5000;
+const CODEX_APP_SERVER_REQUEST_TIMEOUT_MS = Number(
+  process.env.CODEX2FRP_APP_SERVER_REQUEST_TIMEOUT_MS || 20000,
+);
 const CODEX_DEEPLINK_SETTLE_MS = 560;
 const CODEX_APP_FOCUS_SETTLE_MS = 100;
 const TEXT_PASTE_SETTLE_MS = 140;
@@ -136,6 +188,280 @@ let keepAwakeStartedAt = '';
 let codexCdpLaunchPromise = null;
 let codexCdpLastLaunch = { ok: false, at: 0, detail: '' };
 let codexCdpPort = CODEX_CDP_PREFERRED_PORT;
+let v3QueueDispatchTimer = null;
+const v3QueueDispatchingThreads = new Set();
+
+function splitConfiguredIds(value) {
+  return String(value || '').split(/[;,\s]+/).map(item => item.trim()).filter(Boolean);
+}
+
+const threadProtectionRegistry = new ThreadProtectionRegistry({
+  file: PROTECTED_THREADS_FILE,
+  environment: process.env,
+  protectedThreadIds: splitConfiguredIds(process.env.CODEX2FRP_PROTECTED_THREAD_IDS),
+});
+
+function unavailableV3Runtime(reason, details = {}) {
+  const error = Object.assign(new Error(reason), {
+    code: 'APP_SERVER_INCOMPATIBLE',
+    statusCode: 503,
+    details,
+  });
+  const meta = {
+    apiVersion: 3,
+    versions: {
+      backend: String(packageInfo.version || ''),
+      desktop: String(process.env.CODEX2FRP_CODEX_DESKTOP_VERSION || ''),
+      cli: String(details.cliVersion || ''),
+    },
+    appServer: { state: 'unavailable', pid: null, connectionEpoch: 0 },
+    capabilities: {
+      focusPolicy: 'rpc-zero-focus-ui-explicit-restore',
+      operations: {},
+      unavailableReason: reason,
+    },
+  };
+  return {
+    getMeta: () => structuredClone(meta),
+    withService: async () => { throw error; },
+    stop: () => false,
+  };
+}
+
+function createV3DiagnosticContext() {
+  const result = sakuraRouteCache.result && typeof sakuraRouteCache.result === 'object'
+    ? sakuraRouteCache.result
+    : null;
+  const checkedAt = result && typeof result.checkedAt === 'string' ? result.checkedAt : null;
+  return {
+    environment: {
+      platform: process.platform,
+      nodeVersion: process.version,
+    },
+    route: {
+      kind: 'sakura',
+      status: result && result.ok === true
+        ? 'healthy'
+        : result && result.configured === true
+          ? 'degraded'
+          : 'offline',
+      latencyMs: null,
+      lastSuccessAt: result && result.ok === true ? checkedAt : null,
+      nextRetryAt: result && result.ok !== true && sakuraRouteCache.at > 0
+        ? new Date(sakuraRouteCache.at + SAKURA_ROUTE_CACHE_MS).toISOString()
+        : null,
+      error: { code: result && result.code ? String(result.code) : '' },
+    },
+  };
+}
+
+function createBridgeV3Router(options = {}) {
+  const {
+    runtime,
+    eventRuntime,
+    attachmentStore,
+    queue = null,
+    queueCommandCoordinator = null,
+    protectedThreadGuard = null,
+    protectionRegistry = null,
+    pendingRequestStore = null,
+  } = options;
+  return new V3ApiRouter({
+    runtime,
+    eventRuntime,
+    queue,
+    queueCommandCoordinator,
+    protectedThreadGuard,
+    protectionRegistry,
+    pendingRequestStore,
+    attachmentStore,
+    diagnosticContext: createV3DiagnosticContext,
+    diagnosticTokens: [TOKEN],
+  });
+}
+
+function handleV3ServerRequest(store, request = {}) {
+  const captured = store.capture(request);
+  if (captured) return captured;
+  const method = String(request.method || '');
+  if (method === 'currentTime/read') {
+    return request.respond({ currentTimeAt: Math.floor(Date.now() / 1000) });
+  }
+  if (method === 'item/tool/call') {
+    return request.respond({
+      contentItems: [{ type: 'inputText', text: 'Mobile bridge tool execution is unavailable.' }],
+      success: false,
+    });
+  }
+  return null;
+}
+
+function createV3Bridge() {
+  const executable = discoverCodexExecutable();
+  const cliVersion = detectCodexCliVersion(executable);
+  const profileFile = profileFileForCliVersion(cliVersion);
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const eventRuntime = new ProductionEventRuntime({
+    resolveSession: createSessionResolver({ sessionsDir: path.join(codexHome, 'sessions') }),
+  });
+  const allowedThreadIds = splitConfiguredIds(process.env.CODEX2FRP_ALLOWED_THREAD_IDS);
+  const guard = createDynamicProtectedThreadGuard({
+    registry: threadProtectionRegistry,
+    allowedThreadIds,
+    requireAllowlist: process.env.CODEX2FRP_REQUIRE_ALLOWLIST === '1',
+  });
+  const commandCoordinator = new CommandCoordinator({ guard });
+  // Queue mutations may invoke CodexService mutations. Keep their persistence
+  // lock separate so that startTurn/steerTurn can acquire the RPC lock without
+  // recursively waiting on the same per-thread coordinator tail.
+  const queueCommandCoordinator = new CommandCoordinator({ guard });
+  const attachmentStore = new AttachmentStore({
+    rootDir: ATTACHMENT_STORE_DIR,
+    maxAttachments: MAX_ATTACHMENTS,
+    maxFileBytes: MAX_ATTACHMENT_BYTES,
+    maxTotalBytes: MAX_TOTAL_ATTACHMENT_BYTES,
+  });
+  const pendingRequestStore = new PendingRequestStore();
+  try {
+    attachmentStore.cleanupExpired();
+  } catch {}
+
+  if (!executable || !cliVersion || !profileFile) {
+    const runtime = unavailableV3Runtime('No compatible Codex app-server profile is available.', {
+      cliVersion,
+      executableFound: Boolean(executable),
+    });
+    return {
+      runtime,
+      eventRuntime,
+      router: createBridgeV3Router({
+        runtime,
+        eventRuntime,
+        attachmentStore,
+        protectionRegistry: threadProtectionRegistry,
+      }),
+      queue: null,
+    };
+  }
+
+  try {
+    const profile = loadSchemaProfile(profileFile);
+    const runtime = new AppServerRuntime({
+      processManager: new AppServerProcessManager({
+        command: executable,
+        requestTimeoutMs: CODEX_APP_SERVER_REQUEST_TIMEOUT_MS,
+      }),
+      schemaProfile: profile,
+      codexHome,
+      commandCoordinator,
+      protectedThreadGuard: guard,
+      initializeParams: {
+        clientInfo: {
+          name: 'codex2frp',
+          title: APP_NAME,
+          version: String(packageInfo.version || ''),
+        },
+        capabilities: { experimentalApi: true },
+      },
+      backendVersion: String(packageInfo.version || ''),
+      desktopVersion: String(process.env.CODEX2FRP_CODEX_DESKTOP_VERSION || ''),
+      cliVersion,
+      notificationSink: notification => eventRuntime.ingestRpcNotification(notification),
+      serverRequestSink: request => handleV3ServerRequest(pendingRequestStore, request),
+      bridgeOperations: ['turn.queueNext'],
+      uiExplicitOperations: ['composer.plus'],
+    });
+    const queue = new TurnInputQueue({
+      store: createProductionQueueStore({ file: TURN_INPUT_QUEUE_FILE }),
+    });
+    const router = createBridgeV3Router({
+      runtime,
+      eventRuntime,
+      queue,
+      queueCommandCoordinator,
+      protectedThreadGuard: guard,
+      protectionRegistry: threadProtectionRegistry,
+      attachmentStore,
+      pendingRequestStore,
+    });
+    return { runtime, eventRuntime, router, queue, pendingRequestStore };
+  } catch (error) {
+    const runtime = unavailableV3Runtime('Codex app-server initialization profile is invalid.', {
+      cliVersion,
+      code: String(error && error.code || 'APP_SERVER_PROFILE_INVALID'),
+    });
+    return {
+      runtime,
+      eventRuntime,
+      router: createBridgeV3Router({
+        runtime,
+        eventRuntime,
+        attachmentStore,
+        protectionRegistry: threadProtectionRegistry,
+      }),
+      queue: null,
+    };
+  }
+}
+
+const v3Bridge = createV3Bridge();
+const v3ApiRouter = v3Bridge.router;
+const explicitUiProtectedThreadGuard = createDynamicProtectedThreadGuard({
+  registry: threadProtectionRegistry,
+  allowedThreadIds: splitConfiguredIds(process.env.CODEX2FRP_ALLOWED_THREAD_IDS),
+  requireAllowlist: process.env.CODEX2FRP_REQUIRE_ALLOWLIST === '1',
+});
+const explicitWin32FocusAdapter = new Win32FocusAdapter();
+const uiActionTransaction = new UiActionTransaction({
+  adapter: explicitWin32FocusAdapter,
+  guard: explicitUiProtectedThreadGuard,
+  timeoutMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_MS || 15000),
+  timeoutGraceMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_GRACE_MS || 2000),
+  resolveObservedThread: resolveExplicitUiObservedThread,
+});
+const explicitProcessControlTransaction = new ExplicitProcessControlTransaction({
+  adapter: explicitWin32FocusAdapter,
+  guard: explicitUiProtectedThreadGuard,
+  timeoutMs: Number(process.env.CODEX2FRP_PROCESS_CONTROL_TIMEOUT_MS || 60000),
+  timeoutGraceMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_GRACE_MS || 2000),
+  resolveObservedThread: resolveExplicitProcessObservedThread,
+});
+const explicitUiActionStorage = new AsyncLocalStorage();
+const REQUEST_BODY_CACHE = Symbol('request-body-cache');
+
+function assertExplicitUiActionNotAborted(signal = explicitUiActionStorage.getStore()?.signal) {
+  const fence = explicitUiActionStorage.getStore()?.fence;
+  if (fence && typeof fence.assertAllowed === 'function') fence.assertAllowed();
+  if (!signal || signal.aborted !== true) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error('Explicit UI action was aborted.');
+  error.code = 'UI_ACTION_ABORTED';
+  error.statusCode = 409;
+  throw error;
+}
+
+async function resolveExplicitUiObservedThread() {
+  const selection = await readCurrentCodexThreadSelection({ force: true });
+  const threadId = selection && selection.threadId || '';
+  if (!threadId && threadProtectionRegistry.summary().protectedCount > 0) {
+    const error = new Error('The active desktop task could not be verified safely.');
+    error.code = 'UI_ACTIVE_THREAD_UNKNOWN';
+    error.statusCode = 409;
+    throw error;
+  }
+  return threadId;
+}
+
+async function resolveExplicitProcessObservedThread() {
+  if (threadProtectionRegistry.summary().protectedCount === 0) return '';
+  const selection = await readCurrentCodexThreadSelection({ force: true });
+  const threadId = selection && selection.threadId || '';
+  if (threadId) return threadId;
+  const error = new Error('Codex control cannot be enabled while a protected desktop task cannot be verified. Finish or leave that task, then retry the explicit control action.');
+  error.code = 'PROTECTED_THREAD_CONTROL_ENABLE_BLOCKED';
+  error.statusCode = 409;
+  throw error;
+}
 
 function fileCacheSignature(stat) {
   return stat ? `${stat.size}:${stat.mtimeMs}` : '';
@@ -699,10 +1025,7 @@ function resolveFailureTextForTurn(threadId, options = {}) {
 function cleanUserHistoryText(value) {
   const goalText = extractGoalObjectiveText(value);
   const text = normalizeHistoryText(goalText || value);
-  const marker = '## My request for Codex:';
-  const index = text.indexOf(marker);
-  if (index >= 0) return normalizeHistoryText(text.slice(index + marker.length));
-  return text;
+  return normalizeHistoryText(parseUserMessageEnvelope(text).text);
 }
 
 function isInternalCodexTitleText(value) {
@@ -1536,8 +1859,7 @@ function countCodexHistoryMessages(lines, maxNeeded = MAX_HISTORY_MESSAGES) {
         if (currentTurn) currentTurn.hasAssistant = true;
       }
     } else if (item.type === 'event_msg' && payload.type === 'task_complete') {
-      const lastMessage = normalizeHistoryText(payload.last_agent_message || '');
-      if (currentTurn && !currentTurn.hasAssistant) count += lastMessage ? 1 : 1;
+      if (currentTurn && !currentTurn.hasAssistant) count += 1;
       currentTurn = null;
     } else if (item.type === 'event_msg' && isTerminalFailurePayload(payload)) {
       if (currentTurn && !currentTurn.hasAssistant) count += 1;
@@ -1619,6 +1941,7 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
       threadId,
       sessionFile: '',
       messages: [],
+      turns: [],
       message: '没有找到所选线程的 Codex 会话文件。',
     };
   }
@@ -1632,6 +1955,7 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
       threadId,
       sessionFile: '',
       messages: [],
+      turns: [],
       message: '没有找到所选线程的 Codex 会话文件。',
     };
   }
@@ -1641,6 +1965,8 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
   if (threadHistoryCache.has(cacheKey)) return threadHistoryCache.get(cacheKey);
 
   const messages = [];
+  const normalizedEvents = [];
+  const sessionNormalizer = createSessionNormalizer({ session: { isSubagent: false } });
   let currentTurn = null;
   function addAssistantMessage(turn, text, timestamp, label = 'Codex') {
     const normalizedText = normalizeHistoryText(text);
@@ -1752,6 +2078,8 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     let item;
     try { item = JSON.parse(line); } catch { continue; }
     const payload = item.payload || {};
+    const normalizedEvent = sessionNormalizer.normalize(item);
+    if (normalizedEvent) normalizedEvents.push(normalizedEvent);
 
     if (item.type === 'event_msg' && payload.type === 'task_started') {
       currentTurn = {
@@ -1808,7 +2136,6 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     }
 
     if (item.type === 'event_msg' && payload.type === 'task_complete') {
-      const lastMessage = normalizeHistoryText(payload.last_agent_message || '');
       const completedAt = item.timestamp || '';
       insertProgressBeforeFinal(currentTurn, 'complete', completedAt);
       if (currentTurn && !currentTurn.hasAssistant) {
@@ -1818,11 +2145,10 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
           completedAt,
           failureText: currentTurn.failureText || '',
         });
-        const fallbackText = isProcessEchoMessage(lastMessage, currentTurn.steps) ? '' : lastMessage;
-        if (fallbackText || failureText) {
+        if (failureText) {
           addAssistantMessage(
             currentTurn,
-            fallbackText || failureText || emptyCodexFailureText(),
+            failureText,
             completedAt || currentTurn.startedAt || '',
             failureText ? historyFailureLabel(currentTurn.startedAt, completedAt) : historyCompleteLabel(currentTurn.startedAt, completedAt)
           );
@@ -1857,6 +2183,7 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     sessionFile: path.basename(file),
     truncated: historyTail.stat.size > CODEX_HISTORY_TAIL_BYTES,
     messages: messages.slice(-normalizedLimit),
+    turns: buildTurnViews(normalizedEvents, threadId).slice(-normalizedLimit),
   }, 80);
 }
 
@@ -1879,11 +2206,79 @@ function imageMimeTypeForFile(filePath = '') {
   return '';
 }
 
+function validatedImageFile(filePath = '') {
+  try {
+    const resolvedPath = fs.realpathSync(path.resolve(String(filePath || '')));
+    const stat = fs.statSync(resolvedPath);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_OUTPUT_ATTACHMENT_BYTES) return null;
+    const extensionMime = imageMimeTypeForFile(resolvedPath);
+    if (!extensionMime) return null;
+    const descriptor = fs.openSync(resolvedPath, 'r');
+    const header = Buffer.alloc(16);
+    let bytesRead = 0;
+    try { bytesRead = fs.readSync(descriptor, header, 0, header.length, 0); } finally { fs.closeSync(descriptor); }
+    const sample = header.subarray(0, bytesRead);
+    const magicMime = sample.length >= 8 && sample.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      ? 'image/png'
+      : sample.length >= 3 && sample[0] === 0xff && sample[1] === 0xd8 && sample[2] === 0xff
+        ? 'image/jpeg'
+        : sample.length >= 6 && ['GIF87a', 'GIF89a'].includes(sample.subarray(0, 6).toString('ascii'))
+          ? 'image/gif'
+          : sample.length >= 12 && sample.subarray(0, 4).toString('ascii') === 'RIFF' && sample.subarray(8, 12).toString('ascii') === 'WEBP'
+            ? 'image/webp'
+            : sample.length >= 2 && sample.subarray(0, 2).toString('ascii') === 'BM'
+              ? 'image/bmp'
+              : sample.length >= 12 && sample.subarray(4, 8).toString('ascii') === 'ftyp'
+                ? (sample.subarray(8, 12).toString('ascii').startsWith('hei') ? extensionMime : '')
+                : '';
+    if (!magicMime || (extensionMime !== magicMime && !(extensionMime === 'image/heif' && magicMime === 'image/heif'))) return null;
+    return { filePath: resolvedPath, mimeType: magicMime, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+function cleanupOutputAttachmentCapabilities(now = Date.now()) {
+  for (const [handle, entry] of outputAttachmentCapabilities) {
+    if (!entry || entry.expiresAt <= now) {
+      outputAttachmentCapabilities.delete(handle);
+      if (entry && outputAttachmentHandleBySignature.get(entry.signature) === handle) {
+        outputAttachmentHandleBySignature.delete(entry.signature);
+      }
+    }
+  }
+}
+
+function registerOutputAttachment(filePath = '') {
+  const validated = validatedImageFile(filePath);
+  if (!validated) return null;
+  cleanupOutputAttachmentCapabilities();
+  const signature = `${validated.filePath}:${validated.size}:${Math.round(validated.mtimeMs)}`;
+  let handle = outputAttachmentHandleBySignature.get(signature) || '';
+  if (!OUTPUT_ATTACHMENT_HANDLE_PATTERN.test(handle)) {
+    handle = crypto.createHmac('sha256', outputAttachmentCapabilityKey)
+      .update(signature)
+      .digest('base64url')
+      .slice(0, 32);
+  }
+  const entry = { ...validated, signature, expiresAt: Date.now() + OUTPUT_ATTACHMENT_TTL_MS };
+  outputAttachmentCapabilities.set(handle, entry);
+  outputAttachmentHandleBySignature.set(signature, handle);
+  while (outputAttachmentCapabilities.size > 256) {
+    const first = outputAttachmentCapabilities.keys().next().value;
+    const removed = outputAttachmentCapabilities.get(first);
+    outputAttachmentCapabilities.delete(first);
+    if (removed && outputAttachmentHandleBySignature.get(removed.signature) === first) {
+      outputAttachmentHandleBySignature.delete(removed.signature);
+    }
+  }
+  return { handle, ...entry };
+}
+
 function attachmentUrlFor(req, filePath = '') {
-  const url = new URL('/codex/attachment', requestBaseUrl(req));
-  url.searchParams.set('path', filePath);
-  url.searchParams.set('token', TOKEN);
-  return url.toString();
+  const registered = registerOutputAttachment(filePath);
+  if (!registered) return '';
+  return new URL(`/codex/attachment/${registered.handle}`, requestBaseUrl(req)).toString();
 }
 
 function inlineAttachmentDataUrl(filePath = '', mimeType = '') {
@@ -1926,29 +2321,88 @@ function attachmentFilePath(attachment = {}) {
   }
 }
 
+function safeRemoteAttachmentUrl(value) {
+  const source = String(value || '').trim();
+  if (!source || source.length > 4096 || redactDiagnosticString(source) !== source) return '';
+  try {
+    const parsed = new URL(source);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
 function enrichAttachmentList(attachments, req, options = {}) {
   if (!Array.isArray(attachments) || !attachments.length) return attachments;
   const inlineData = options.inlineData !== false;
   return attachments.map(attachment => {
     const filePath = attachmentFilePath(attachment);
-    const mimeType = attachment.mime || attachment.mimeType || imageMimeTypeForFile(filePath);
-    if (!filePath || !imageMimeTypeForFile(filePath)) {
-      return {
-        ...attachment,
-        mime: attachment.mime || mimeType,
-        mimeType: attachment.mimeType || mimeType,
-      };
-    }
-    return {
-      ...attachment,
-      path: filePath,
-      filePath,
-      mime: attachment.mime || mimeType,
-      mimeType: attachment.mimeType || mimeType,
-      url: attachmentUrlFor(req, filePath),
-      dataUrl: inlineData ? (attachment.dataUrl || inlineAttachmentDataUrl(filePath, mimeType)) : '',
+    const mimeType = String(attachment.mime || attachment.mimeType || imageMimeTypeForFile(filePath) || 'image/*')
+      .trim().slice(0, 128) || 'image/*';
+    const name = path.basename(String(attachment.name || filePath || 'image')) || 'image';
+    const declaredSize = Number(attachment.size);
+    const metadata = {
+      name,
+      mime: mimeType,
+      mimeType,
+      ...(Number.isFinite(declaredSize) && declaredSize >= 0 ? { size: Math.floor(declaredSize) } : {}),
     };
-  });
+    if (filePath) {
+      const registered = registerOutputAttachment(filePath);
+      if (registered) {
+        return {
+          name,
+          mime: registered.mimeType,
+          mimeType: registered.mimeType,
+          size: registered.size,
+          url: new URL(`/codex/attachment/${registered.handle}`, requestBaseUrl(req)).toString(),
+          ...(inlineData ? { dataUrl: inlineAttachmentDataUrl(registered.filePath, registered.mimeType) } : {}),
+        };
+      }
+      return metadata;
+    }
+    const sourceUrl = safeRemoteAttachmentUrl(attachment.url);
+    const dataUrl = String(attachment.dataUrl || '');
+    if (sourceUrl) {
+      return { ...metadata, url: sourceUrl };
+    }
+    if (inlineData && /^data:image\//i.test(dataUrl) && dataUrl.length <= INLINE_ATTACHMENT_BYTES * 1.5) {
+      return { ...metadata, dataUrl };
+    }
+    return metadata;
+  }).filter(Boolean);
+}
+
+function enrichV3EventResponse(body, req) {
+  if (!body || !Array.isArray(body.events)) return body;
+  return {
+    ...body,
+    events: body.events.map(event => {
+      if (!event || !Array.isArray(event.attachments) || event.attachments.length === 0) return event;
+      return {
+        ...event,
+        attachments: enrichAttachmentList(event.attachments, req, { inlineData: false }),
+      };
+    }),
+  };
+}
+
+function legacyAttachmentFile(url) {
+  const filePath = String(url.searchParams.get('path') || '');
+  return validatedImageFile(filePath);
+}
+
+function capabilityAttachmentFile(url) {
+  const match = url.pathname.match(/^\/codex\/attachment\/([A-Za-z0-9_-]{32})$/);
+  if (!match) return null;
+  cleanupOutputAttachmentCapabilities();
+  const entry = outputAttachmentCapabilities.get(match[1]);
+  if (!entry) return null;
+  const current = validatedImageFile(entry.filePath);
+  if (!current || current.size !== entry.size || Math.round(current.mtimeMs) !== Math.round(entry.mtimeMs)) return null;
+  entry.expiresAt = Date.now() + OUTPUT_ATTACHMENT_TTL_MS;
+  return current;
 }
 
 function enrichStatusAttachments(status, req) {
@@ -1962,27 +2416,51 @@ function enrichStatusAttachments(status, req) {
   };
 }
 
+function enrichHistoryMessage(message, req) {
+  const next = { ...message };
+  if (Array.isArray(next.attachments)) {
+    next.attachments = enrichAttachmentList(next.attachments, req, { inlineData: false });
+  }
+  if (Array.isArray(next.processSteps)) {
+    next.processSteps = next.processSteps.map(step => ({
+      ...step,
+      ...(Array.isArray(step.attachments)
+        ? { attachments: enrichAttachmentList(step.attachments, req, { inlineData: false }) }
+        : {}),
+    }));
+  }
+  return next;
+}
+
+function enrichHistoryTurn(turn, req) {
+  const next = { ...turn };
+  if (next.user) next.user = enrichHistoryMessage(next.user, req);
+  if (next.final) next.final = enrichHistoryMessage(next.final, req);
+  if (next.process) {
+    next.process = { ...next.process };
+    for (const field of ['activities', 'detailActivities']) {
+      if (!Array.isArray(next.process[field])) continue;
+      next.process[field] = next.process[field].map(activity => ({
+        ...activity,
+        ...(Array.isArray(activity.attachments)
+          ? { attachments: enrichAttachmentList(activity.attachments, req, { inlineData: false }) }
+          : {}),
+      }));
+    }
+  }
+  return next;
+}
+
 function enrichHistoryAttachments(history, req) {
-  if (!history || !Array.isArray(history.messages)) return history;
-  return {
-    ...history,
-    messages: history.messages.map(message => {
-      let next = message;
-      if (Array.isArray(message.attachments) && message.attachments.length) {
-        next = { ...next, attachments: enrichAttachmentList(message.attachments, req, { inlineData: false }) };
-      }
-      if (Array.isArray(message.processSteps) && message.processSteps.length) {
-        next = {
-          ...next,
-          processSteps: message.processSteps.map(step => {
-            if (!step || !Array.isArray(step.attachments) || !step.attachments.length) return step;
-            return { ...step, attachments: enrichAttachmentList(step.attachments, req, { inlineData: false }) };
-          }),
-        };
-      }
-      return next;
-    }),
-  };
+  if (!history || typeof history !== 'object') return history;
+  const next = { ...history };
+  if (Array.isArray(next.messages)) {
+    next.messages = next.messages.map(message => enrichHistoryMessage(message, req));
+  }
+  if (Array.isArray(next.turns)) {
+    next.turns = next.turns.map(turn => enrichHistoryTurn(turn, req));
+  }
+  return next;
 }
 
 function handleThreadHistory(req, res) {
@@ -2003,28 +2481,28 @@ function handleThreadHistory(req, res) {
 }
 
 function handleAttachment(req, res) {
-  if (!isAuthorized(req)) {
-    return json(res, 401, { ok: false, code: 'UNAUTHORIZED', message: '访问令牌不正确。' });
-  }
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const filePath = String(url.searchParams.get('path') || '');
-    const mimeType = imageMimeTypeForFile(filePath);
-    if (!filePath || !mimeType) {
-      return json(res, 400, { ok: false, code: 'BAD_ATTACHMENT', message: '附件路径不是可显示图片。' });
+    const capabilityPath = /^\/codex\/attachment\//.test(url.pathname);
+    if (!capabilityPath && !isAuthorized(req)) {
+      return json(res, 401, { ok: false, code: 'UNAUTHORIZED', message: '访问令牌不正确。' });
     }
-    const resolvedPath = path.resolve(filePath);
-    const stat = fs.statSync(resolvedPath);
-    if (!stat.isFile()) {
-      return json(res, 404, { ok: false, code: 'ATTACHMENT_NOT_FOUND', message: '图片附件不存在。' });
+    const attachment = capabilityPath ? capabilityAttachmentFile(url) : legacyAttachmentFile(url);
+    if (!attachment) {
+      return json(res, capabilityPath ? 404 : 400, {
+        ok: false,
+        code: capabilityPath ? 'ATTACHMENT_NOT_FOUND' : 'BAD_ATTACHMENT',
+        message: capabilityPath ? '图片附件已失效或不存在。' : '附件路径不是可显示图片。',
+      });
     }
     res.writeHead(200, {
       ...corsHeaders(),
-      'content-type': mimeType,
-      'cache-control': 'private, max-age=60',
-      'content-length': stat.size,
+      'content-type': attachment.mimeType,
+      'cache-control': 'private, max-age=300',
+      'content-length': attachment.size,
+      'x-content-type-options': 'nosniff',
     });
-    fs.createReadStream(resolvedPath).pipe(res);
+    fs.createReadStream(attachment.filePath).pipe(res);
   } catch (error) {
     return json(res, 404, { ok: false, code: 'ATTACHMENT_NOT_FOUND', message: '图片附件无法读取。', detail: String(error && error.message || error) });
   }
@@ -2693,11 +3171,7 @@ function parseCodexStatus(options = {}) {
       active = false;
       completed = true;
       completedAt = item.timestamp || completedAt;
-      const lastMessage = normalizeHistoryText(payload.last_agent_message || '');
-      if (lastMessage && !isProcessEchoMessage(lastMessage, steps)) {
-        final = lastMessage || final;
-      }
-      if (!lastMessage && !final && !preview && sawTaskStarted) emptyComplete = true;
+      if (!final && !preview && sawTaskStarted) emptyComplete = true;
     }
     if (item.type === 'event_msg' && isTerminalFailurePayload(payload)) {
       active = false;
@@ -2890,8 +3364,8 @@ function json(res, status, data) {
 function corsHeaders() {
   return {
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type,x-mobile-typer-token',
+    'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    'access-control-allow-headers': 'authorization,content-type,x-mobile-typer-token',
     'access-control-allow-private-network': 'true',
   };
 }
@@ -2902,7 +3376,8 @@ function options(res) {
 }
 
 function readBody(req) {
-  return new Promise((resolve, reject) => {
+  if (req[REQUEST_BODY_CACHE]) return req[REQUEST_BODY_CACHE];
+  req[REQUEST_BODY_CACHE] = new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', chunk => {
@@ -2917,31 +3392,47 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+  return req[REQUEST_BODY_CACHE];
 }
 
 function isAuthorized(req) {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const fromHeader = req.headers['x-mobile-typer-token'];
-  const fromQuery = url.searchParams.get('token');
-  const fromCookie = parseCookies(req.headers.cookie || '').codex2frpToken;
-  return fromHeader === TOKEN || fromQuery === TOKEN || fromCookie === TOKEN;
+  return isAuthorizedRequest(req, TOKEN, {
+    allowLegacyHeader: true,
+    allowLegacyQuery: true,
+    allowLegacyCookie: true,
+  });
 }
 
-function parseCookies(header) {
-  const cookies = {};
-  for (const part of String(header || '').split(';')) {
-    const index = part.indexOf('=');
-    if (index === -1) continue;
-    const key = part.slice(0, index).trim();
-    if (!key) continue;
-    const value = part.slice(index + 1).trim();
+async function handleV3ApiRequest(req, res) {
+  if (!isAuthorized(req)) {
+    return json(res, 401, { error: { code: 'UNAUTHORIZED', message: '访问令牌不正确。' } });
+  }
+  let body = {};
+  if (!['GET', 'HEAD'].includes(req.method)) {
     try {
-      cookies[key] = decodeURIComponent(value);
-    } catch {
-      cookies[key] = value;
+      body = JSON.parse(await readBody(req) || '{}');
+    } catch (error) {
+      return json(res, error && error.status || 400, {
+        error: {
+          code: error && error.status === 413 ? 'REQUEST_TOO_LARGE' : 'BAD_REQUEST',
+          message: error && error.message || '请求格式不正确。',
+        },
+      });
     }
   }
-  return cookies;
+  const result = await v3ApiRouter.handle({
+    method: req.method,
+    url: req.url,
+    body,
+  });
+  if (!result || result.handled !== true) {
+    return json(res, 404, { error: { code: 'NOT_FOUND', message: 'API route not found.' } });
+  }
+  const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+  const bodyForClient = /\/events(?:\/snapshot|\/cursor)?$/.test(pathname)
+    ? enrichV3EventResponse(result.body, req)
+    : result.body;
+  return json(res, result.statusCode || 200, bodyForClient);
 }
 
 function cleanupRecentSendRequests() {
@@ -2957,19 +3448,49 @@ function normalizeClientRequestId(value) {
 }
 
 function runProcess(command, args, input) {
+  assertExplicitUiActionNotAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const signal = explicitUiActionStorage.getStore()?.signal;
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    const finishResolve = value => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const finishReject = error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      try { child.kill('SIGTERM'); } catch {}
+      try {
+        assertExplicitUiActionNotAborted(signal);
+      } catch (error) {
+        finishReject(error);
+      }
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    if (signal && signal.aborted) onAbort();
     child.stdout.on('data', d => { stdout += d.toString(); });
     child.stderr.on('data', d => { stderr += d.toString(); });
-    child.on('error', reject);
+    child.on('error', finishReject);
     child.on('close', code => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(Object.assign(new Error(stderr.trim() || `${command} exited with code ${code}`), { code, stdout, stderr }));
+      if (code === 0) finishResolve({ stdout, stderr });
+      else finishReject(Object.assign(new Error(stderr.trim() || `${command} exited with code ${code}`), { code, stdout, stderr }));
     });
-    if (input) child.stdin.write(input);
-    child.stdin.end();
+    if (!settled) {
+      if (input) child.stdin.write(input);
+      child.stdin.end();
+    }
   });
 }
 
@@ -2988,41 +3509,29 @@ function runPowerShell(script, input = '') {
 }
 
 async function restoreCodexDesktopWindow(options = {}) {
+  assertExplicitUiActionNotAborted();
   if (process.platform !== 'win32') return false;
+  const session = explicitUiActionStorage.getStore();
+  if (!session || !session.windowHandle) return false;
   const settleMs = Number(options.settleMs ?? CODEX_WINDOW_RESTORE_SETTLE_MS);
-  const script = `
-$definition = @"
-using System;
-using System.Runtime.InteropServices;
-public static class Codex2FrpWindowOps {
-  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-}
-"@
-Add-Type -TypeDefinition $definition -ErrorAction SilentlyContinue | Out-Null
-$windows = Get-Process Codex -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
-$count = 0
-foreach ($process in $windows) {
-  [Codex2FrpWindowOps]::ShowWindowAsync($process.MainWindowHandle, 9) | Out-Null
-  [Codex2FrpWindowOps]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
-  $count += 1
-}
-Write-Output $count
-`;
   try {
-    const { stdout } = await runPowerShell(script);
+    const activated = uiActionTransaction.adapter.activateWindow(session.windowHandle);
     if (settleMs > 0) await delay(settleMs);
-    return Number(String(stdout || '').trim()) > 0;
-  } catch {
+    assertExplicitUiActionNotAborted();
+    return activated !== false;
+  } catch (error) {
+    assertExplicitUiActionNotAborted();
     return false;
   }
 }
 
 async function openWindowsUri(uri) {
+  assertExplicitUiActionNotAborted();
   await runPowerShell(`Start-Process -FilePath ${psSingleQuote(uri)}`);
 }
 
 async function sendWindowsKeys(keys) {
+  assertExplicitUiActionNotAborted();
   await runPowerShell(`Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(${psSingleQuote(keys)})`);
 }
 
@@ -3065,6 +3574,7 @@ function explainTargetError(error, target) {
 }
 
 async function copyTextToClipboard(text) {
+  assertExplicitUiActionNotAborted();
   const filePath = path.join(os.tmpdir(), `codex2frp-clipboard-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.txt`);
   fs.writeFileSync(filePath, String(text || ''), 'utf8');
   try {
@@ -3118,17 +3628,17 @@ function canBindCdpPort(port) {
   });
 }
 
-async function findRunningCodexCdpPorts() {
+async function findRunningCodexCdpPorts(options = {}) {
   if (process.platform !== 'win32') return [];
   const script = String.raw`
 $ErrorActionPreference = "SilentlyContinue"
-Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
+Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe'" |
   ForEach-Object {
     $exe = [string]$_.ExecutablePath
     $cmd = [string]$_.CommandLine
     if (-not $cmd) { return }
     if ($cmd -match '\s--type=') { return }
-    if ($exe -and (($exe -replace '/', '\') -notmatch '\\app\\Codex\.exe$')) { return }
+    if ($exe -and (($exe -replace '/', '\') -notmatch '\\app\\(ChatGPT|Codex)\.exe$')) { return }
     if ($cmd -match '--remote-debugging-port=(\d+)') {
       [PSCustomObject]@{ port = [int]$Matches[1]; processId = [int]$_.ProcessId }
     }
@@ -3142,9 +3652,15 @@ Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
     if (!text) return [];
     const parsed = JSON.parse(text);
     const rows = Array.isArray(parsed) ? parsed : [parsed];
-    return [...new Set(rows
-      .map(row => Number(row && row.port))
-      .filter(port => Number.isInteger(port) && port > 0 && port < 65536))];
+    const normalizedRows = rows
+      .map(row => ({
+        port: Number(row && row.port),
+        processId: Number(row && row.processId),
+      }))
+      .filter(row => Number.isInteger(row.port) && row.port > 0 && row.port < 65536
+        && Number.isSafeInteger(row.processId) && row.processId > 0);
+    if (options.includeProcessIds === true) return normalizedRows;
+    return [...new Set(normalizedRows.map(row => row.port))];
   } catch {
     return [];
   }
@@ -3160,10 +3676,7 @@ async function probeCodexCdpTarget(timeoutMs = 1200) {
       try {
         const targets = await fetchJsonWithTimeout(`http://${host}:${port}/json/list`, timeoutMs);
         const pages = Array.isArray(targets) ? targets : [];
-        const target = pages.find(item => item.type === 'page' && item.url === 'app://-/index.html' && item.webSocketDebuggerUrl)
-          || pages.find(item => item.type === 'page' && String(item.url || '').startsWith('app://-/index.html') && !String(item.url || '').includes('initialRoute=') && item.webSocketDebuggerUrl)
-          || pages.find(item => item.type === 'page' && String(item.url || '').startsWith('app://-/index.html') && item.webSocketDebuggerUrl)
-          || pages.find(item => item.type === 'page' && item.webSocketDebuggerUrl);
+        const target = selectCodexCdpTarget(pages);
         if (target) {
           codexCdpPort = port;
           return target;
@@ -3189,6 +3702,7 @@ function shouldAutoOpenCodexCdp(options = {}) {
 }
 
 async function runCodexCdpLauncher(options = {}) {
+  assertExplicitUiActionNotAborted(options.signal);
   const scriptPath = codexCdpLauncherScriptPath();
   if (!fs.existsSync(scriptPath)) {
     const error = new Error('Codex CDP launcher script was not found.');
@@ -3200,11 +3714,14 @@ async function runCodexCdpLauncher(options = {}) {
 
   const forceRestart = options.forceRestart === true;
   const runningPorts = await findRunningCodexCdpPorts();
+  assertExplicitUiActionNotAborted(options.signal);
   if (runningPorts.length > 0) {
     for (const runningPort of runningPorts) {
+      assertExplicitUiActionNotAborted(options.signal);
       codexCdpPort = runningPort;
       try {
         await probeCodexCdpTarget(options.verifyTimeoutMs || 2500);
+        assertExplicitUiActionNotAborted(options.signal);
         if (forceRestart) break;
         const readyPort = codexCdpPort;
         codexCdpLastLaunch = {
@@ -3227,7 +3744,9 @@ async function runCodexCdpLauncher(options = {}) {
 
   let lastError = null;
   for (const launchPort of codexCdpPortCandidates()) {
+    assertExplicitUiActionNotAborted(options.signal);
     if (!forceRestart && !(await canBindCdpPort(launchPort))) continue;
+    assertExplicitUiActionNotAborted(options.signal);
     const args = [
       '-NoProfile',
       '-ExecutionPolicy',
@@ -3253,42 +3772,71 @@ async function runCodexCdpLauncher(options = {}) {
         });
         let stdout = '';
         let stderr = '';
-        const timer = setTimeout(() => {
+        let timer = null;
+        let settled = false;
+        const signal = options.signal;
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', onAbort);
+        };
+        const finishResolve = value => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(value);
+        };
+        const finishReject = error => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+        const onAbort = () => {
+          try { child.kill('SIGTERM'); } catch {}
+          try {
+            assertExplicitUiActionNotAborted(signal);
+          } catch (error) {
+            finishReject(error);
+          }
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+        if (signal && signal.aborted) onAbort();
+        if (!settled) timer = setTimeout(() => {
           try { child.kill('SIGTERM'); } catch {}
           const error = new Error('Timed out while opening Codex control port.');
           error.status = 502;
           error.code = 'CODEX_CDP_LAUNCH_TIMEOUT';
           error.detail = [stdout, stderr].filter(Boolean).join('\n').slice(-4000);
-          reject(error);
+          finishReject(error);
         }, CODEX_CDP_LAUNCH_TIMEOUT_MS);
 
         child.stdout.on('data', data => { stdout += data.toString(); });
         child.stderr.on('data', data => { stderr += data.toString(); });
         child.on('error', error => {
-          clearTimeout(timer);
           error.status = error.status || 502;
           error.code = error.code || 'CODEX_CDP_LAUNCH_FAILED';
           error.detail = [stdout, stderr].filter(Boolean).join('\n').slice(-4000);
-          reject(error);
+          finishReject(error);
         });
         child.on('close', code => {
-          clearTimeout(timer);
           const detail = [stdout, stderr].filter(Boolean).join('\n').slice(-4000);
           if (code === 0) {
-            resolve({ ok: true, code, detail });
+            finishResolve({ ok: true, code, detail });
           } else {
             const error = new Error(stderr.trim() || stdout.trim() || `Codex CDP launcher exited with code ${code}`);
             error.status = 502;
             error.code = 'CODEX_CDP_LAUNCH_FAILED';
             error.detail = detail;
-            reject(error);
+            finishReject(error);
           }
         });
       });
+      assertExplicitUiActionNotAborted(options.signal);
       codexCdpPort = launchPort;
       codexCdpLastLaunch = { ok: true, at: Date.now(), detail: result.detail, port: launchPort };
       return { ...result, port: launchPort };
     } catch (error) {
+      assertExplicitUiActionNotAborted(options.signal);
       lastError = error;
       codexCdpLastLaunch = { ok: false, at: Date.now(), detail: error.detail || error.message || String(error), port: launchPort };
     }
@@ -3301,6 +3849,7 @@ async function runCodexCdpLauncher(options = {}) {
 }
 
 async function ensureCodexCdpReady(options = {}) {
+  assertExplicitUiActionNotAborted(options.signal);
   try {
     const target = await probeCodexCdpTarget(options.probeTimeoutMs || 1200);
     return {
@@ -3325,7 +3874,9 @@ async function ensureCodexCdpReady(options = {}) {
       .finally(() => { codexCdpLaunchPromise = null; });
   }
   const launch = await codexCdpLaunchPromise;
+  assertExplicitUiActionNotAborted(options.signal);
   const target = await probeCodexCdpTarget(options.verifyTimeoutMs || 2500);
+  assertExplicitUiActionNotAborted(options.signal);
   return {
     ok: true,
     ready: true,
@@ -3365,6 +3916,7 @@ function connectCdpWebSocket(wsUrl, timeoutMs = CODEX_CDP_SEND_TIMEOUT_MS) {
       clearTimeout(timer);
       resolve({
         call(method, params = {}) {
+          assertExplicitUiActionNotAborted();
           return new Promise((callResolve, callReject) => {
             const id = ++nextId;
             const callTimer = setTimeout(() => {
@@ -3382,6 +3934,7 @@ function connectCdpWebSocket(wsUrl, timeoutMs = CODEX_CDP_SEND_TIMEOUT_MS) {
               },
             });
             try {
+              assertExplicitUiActionNotAborted();
               ws.send(JSON.stringify({ id, method, params }));
             } catch (error) {
               clearTimeout(callTimer);
@@ -5849,6 +6402,7 @@ function decodeAttachments(input) {
 }
 
 async function copyImageToClipboard(file) {
+  assertExplicitUiActionNotAborted();
   await runPowerShell(`Set-Clipboard -LiteralPath ${psSingleQuote(file.filePath)}`);
 }
 
@@ -5969,6 +6523,7 @@ async function verifyCodexModelSwitch(threadId = '', target = {}, options = {}) 
   const deadline = Date.now() + Number(options.timeoutMs || 12000);
   let lastEvidence = '';
   while (Date.now() < deadline) {
+    assertExplicitUiActionNotAborted();
     if (options.domOnly !== true) {
       const file = threadId ? findCodexSessionFileByThreadId(threadId) : findLatestCodexSessionFile();
       if (file) {
@@ -5995,10 +6550,12 @@ async function verifyCodexModelSwitch(threadId = '', target = {}, options = {}) 
         lastEvidence = visibleTexts.slice(0, 8).join(' | ');
       }
     } catch (error) {
+      assertExplicitUiActionNotAborted();
       lastEvidence = error && error.message || String(error);
     }
 
     await delay(250);
+    assertExplicitUiActionNotAborted();
   }
 
   const error = new Error('模型切换未能在 Codex 桌面端确认，请先确认 Codex 窗口可用后重试。');
@@ -6053,6 +6610,7 @@ async function verifyCodexReasoningModeSwitch(threadId = '', target = {}, select
   const deadline = Date.now() + Number(options.timeoutMs || 12000);
   let lastEvidence = selection?.selected?.text || '';
   while (Date.now() < deadline) {
+    assertExplicitUiActionNotAborted();
     try {
       const buttonText = await readCodexComposerModeButtonTextViaCdp();
       if (composerModeTextMatchesReasoning(buttonText, target)) {
@@ -6060,10 +6618,12 @@ async function verifyCodexReasoningModeSwitch(threadId = '', target = {}, select
       }
       lastEvidence = buttonText || lastEvidence;
     } catch (error) {
+      assertExplicitUiActionNotAborted();
       lastEvidence = error && error.message || String(error);
     }
 
     await delay(250);
+    assertExplicitUiActionNotAborted();
   }
 
   const error = new Error('推理模式切换未能在 Codex 桌面端确认，请确认 Codex 窗口可用后重试。');
@@ -6077,6 +6637,7 @@ async function verifyCodexSpeedModeSwitch(target = {}, selection = {}, options =
   const deadline = Date.now() + Number(options.timeoutMs || 12000);
   let lastEvidence = selection?.selected?.text || '';
   while (Date.now() < deadline) {
+    assertExplicitUiActionNotAborted();
     if (options.domOnly === true) {
       try {
         const state = await readCodexComposerModeStateViaCdp({
@@ -6091,9 +6652,11 @@ async function verifyCodexSpeedModeSwitch(target = {}, selection = {}, options =
         }
         lastEvidence = parsedSpeed.value || state?.text || lastEvidence;
       } catch (error) {
+        assertExplicitUiActionNotAborted();
         lastEvidence = error && error.message || String(error);
       }
       await delay(250);
+      assertExplicitUiActionNotAborted();
       continue;
     }
 
@@ -6103,6 +6666,7 @@ async function verifyCodexSpeedModeSwitch(target = {}, selection = {}, options =
     }
     lastEvidence = configMode.value || lastEvidence;
     await delay(250);
+    assertExplicitUiActionNotAborted();
   }
 
   const error = new Error('速度模式切换未能在 Codex 桌面端确认，请确认 Codex 窗口可用后重试。');
@@ -6113,6 +6677,7 @@ async function verifyCodexSpeedModeSwitch(target = {}, selection = {}, options =
 }
 
 async function switchCodexGuiModel(threadId = '', targetKey = '') {
+  assertExplicitUiActionNotAborted();
   if (threadId && !isCodexThreadId(threadId)) {
     const error = new Error('线程 ID 不正确。');
     error.status = 400;
@@ -6130,8 +6695,10 @@ async function switchCodexGuiModel(threadId = '', targetKey = '') {
   } catch (error) {
     liveSyncError = error;
   }
+  assertExplicitUiActionNotAborted();
   const configTargetModel = await trySwitchCodexModelViaConfig(liveTargetModel || target);
   const finalTargetModel = liveTargetModel || configTargetModel;
+  assertExplicitUiActionNotAborted();
   writeControlOverride('model', finalTargetModel.id || target.id || target.key || target.displayName || targetKey);
 
   return {
@@ -6158,6 +6725,7 @@ async function trySwitchCodexModelViaConfig(target = {}) {
     error.code = 'MODEL_CONFIG_VALUE_MISSING';
     throw error;
   }
+  assertExplicitUiActionNotAborted();
   writeCodexConfigStringValue('model', configValue);
   return {
     ...target,
@@ -6213,6 +6781,7 @@ function speedModeTargetForCurrent(current = {}, requestedTarget = '') {
 }
 
 async function switchCodexReasoningMode(threadId = '', targetKey = '') {
+  assertExplicitUiActionNotAborted();
   if (threadId && !isCodexThreadId(threadId)) {
     const error = new Error('线程 ID 不正确。');
     error.status = 400;
@@ -6230,8 +6799,10 @@ async function switchCodexReasoningMode(threadId = '', targetKey = '') {
   } catch (error) {
     liveSyncError = error;
   }
+  assertExplicitUiActionNotAborted();
   const configTargetReasoning = await trySwitchCodexReasoningViaConfig(liveTargetReasoning || target);
   const finalTargetReasoning = liveTargetReasoning || configTargetReasoning;
+  assertExplicitUiActionNotAborted();
   writeControlOverride('reasoning', finalTargetReasoning.key || target.key || target.value);
 
   return {
@@ -6258,6 +6829,7 @@ async function trySwitchCodexReasoningViaConfig(target = {}) {
     error.code = 'REASONING_CONFIG_VALUE_MISSING';
     throw error;
   }
+  assertExplicitUiActionNotAborted();
   writeCodexConfigStringValue('model_reasoning_effort', configValue);
   return {
     ...target,
@@ -6278,6 +6850,7 @@ async function trySyncCodexReasoningViaExistingCdp(target = {}) {
 }
 
 async function switchCodexSpeedMode(threadId = '', targetKey = '') {
+  assertExplicitUiActionNotAborted();
   if (threadId && !isCodexThreadId(threadId)) {
     const error = new Error('线程 ID 不正确。');
     error.status = 400;
@@ -6310,8 +6883,10 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
   } catch (error) {
     liveSyncError = error;
   }
+  assertExplicitUiActionNotAborted();
   const configTargetSpeed = await trySwitchCodexSpeedViaConfig(liveTargetSpeed || target);
   const finalTargetSpeed = liveTargetSpeed || configTargetSpeed;
+  assertExplicitUiActionNotAborted();
   writeControlOverride('speed', finalTargetSpeed.key || target.key || target.value);
 
   return {
@@ -6339,8 +6914,10 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
 }
 
 async function trySwitchCodexSpeedViaConfig(target = {}) {
+  assertExplicitUiActionNotAborted();
   writeCodexConfigStringValue('service_tier', target.serviceTier || target.value || '');
   await delay(CODEX_COMMAND_SETTLE_MS);
+  assertExplicitUiActionNotAborted();
   const verifiedTargetSpeed = await verifyCodexSpeedModeSwitch(target, { selected: { text: 'config-write' } }, { timeoutMs: CODEX_CONFIG_SWITCH_VERIFY_MS });
   verifiedTargetSpeed.verifiedBy = 'config-write';
   return verifiedTargetSpeed;
@@ -6382,11 +6959,8 @@ function assertCodexComposerActionThreadIdle(threadId = '') {
   error.status = 409;
   error.code = 'CODEX_COMPOSER_ACTION_UNAVAILABLE_WHILE_RUNNING';
   error.detail = JSON.stringify({
-    threadId,
     status: status.status || '',
     active: status.active === true,
-    preview: status.preview || '',
-    sessionFile: status.sessionFile || '',
   });
   throw error;
 }
@@ -6717,7 +7291,50 @@ async function handleSpeedMode(req, res) {
   }
 }
 
-async function handleControlPort(req, res) {
+async function resolveControlPortState(payload, options) {
+  payload = payload && typeof payload === 'object' ? payload : {};
+  options = options && typeof options === 'object' ? options : {};
+  assertExplicitUiActionNotAborted(options.signal);
+  const result = await ensureCodexCdpReady({
+    forceRestart: payload.forceRestart === true,
+    autoOpen: payload.autoOpen === true,
+    signal: options.signal,
+  });
+  assertExplicitUiActionNotAborted(options.signal);
+  const modeOptions = options.refreshModeOptions === true
+    ? await readLiveCodexModeOptionsBounded({ force: true }).catch(() => cachedLiveModeOptions())
+    : cachedLiveModeOptions();
+  assertExplicitUiActionNotAborted(options.signal);
+  const state = {
+    launched: result.launched,
+    port: result.port,
+    host: result.host,
+    lastLaunch: result.lastLaunch,
+    modeOptions,
+  };
+  if (options.captureProcessControlReplacement === true) {
+    const processes = await findRunningCodexCdpPorts({ includeProcessIds: true });
+    assertExplicitUiActionNotAborted(options.signal);
+    const controlledProcess = processes.find(process => process.port === result.port);
+    if (!controlledProcess) {
+      const error = new Error('The restarted Codex process could not be correlated safely.');
+      error.code = 'CODEX_CONTROL_PROCESS_UNVERIFIED';
+      error.status = 502;
+      throw error;
+    }
+    attachProcessControlReplacement(state, { processId: controlledProcess.processId });
+  }
+  return state;
+}
+
+const CODEX_CONTROL_PERMISSIONS = Object.freeze([
+  '读取 Codex 当前模型、思考强度、速度按钮状态',
+  '读取模型、思考强度、速度菜单候选项',
+  '点击 Codex 菜单项完成模型、思考强度、速度切换',
+  '向 Codex 输入框插入文字并点击发送按钮',
+]);
+
+async function handleControlPort(req, res, options = {}) {
   if (!isAuthorized(req)) {
     return json(res, 401, { ok: false, code: 'UNAUTHORIZED', message: '访问令牌不正确。' });
   }
@@ -6732,26 +7349,15 @@ async function handleControlPort(req, res) {
   }
 
   try {
-    const result = await ensureCodexCdpReady({
-      forceRestart: payload.forceRestart === true,
-      autoOpen: payload.autoOpen !== false,
+    const state = await resolveControlPortState(payload, {
+      refreshModeOptions: req.method === 'POST',
+      signal: options.signal,
     });
-    const modeOptions = await readLiveCodexModeOptionsBounded({ force: true }).catch(() => null);
     return json(res, 200, {
       ok: true,
       ready: true,
-      launched: result.launched,
-      port: result.port,
-      host: result.host,
-      targetUrl: result.target && result.target.url || '',
-      lastLaunch: result.lastLaunch,
-      modeOptions,
-      permissions: [
-        '读取 Codex 当前模型、思考强度、速度按钮状态',
-        '读取模型、思考强度、速度菜单候选项',
-        '点击 Codex 菜单项完成模型、思考强度、速度切换',
-        '向 Codex 输入框插入文字并点击发送按钮',
-      ],
+      ...state,
+      permissions: [...CODEX_CONTROL_PERMISSIONS],
     });
   } catch (error) {
     return json(res, error.status || 502, {
@@ -6762,7 +7368,7 @@ async function handleControlPort(req, res) {
       detail: error.detail || '',
       port: codexCdpPort,
       host: CODEX_CDP_HOST,
-      autoOpen: shouldAutoOpenCodexCdp({ autoOpen: payload.autoOpen !== false }),
+      autoOpen: shouldAutoOpenCodexCdp({ autoOpen: payload.autoOpen === true }),
     });
   }
 }
@@ -6856,11 +7462,9 @@ async function handleSend(req, res) {
     invalidateCodexThreadListCache();
     const watchSince = new Date(Date.now() - 750).toISOString();
     const watchSinceMs = Date.parse(watchSince) || Date.now();
-    const watchFile = expectNewThread ? null : selectedThreadId ? findCodexSessionFileByThreadId(selectedThreadId) : findLatestCodexSessionFile();
     let watch = target === 'codex' ? {
       since: watchSince,
       threadId: selectedThreadId,
-      sessionFile: watchFile ? path.basename(watchFile) : '',
       expectNewThread,
       excludeThreadId: expectNewThread ? previousThreadId : '',
       cwd: expectNewThread ? expectedNewThreadCwd : '',
@@ -6884,7 +7488,6 @@ async function handleSend(req, res) {
         watch = {
           ...watch,
           threadId: threadIdFromSessionFile(newSessionFile),
-          sessionFile: path.basename(newSessionFile),
           expectNewThread: false,
           excludeThreadId: '',
         };
@@ -7102,8 +7705,7 @@ async function handleClientConfig(req, res) {
   const currentReasoning = liveReasoning || controlOverrideReasoning(controlOverrides, configReasoning) || configReasoning;
   const currentSpeed = liveSpeed || controlOverrideSpeed(controlOverrides, configSpeed) || configSpeed;
   const speedSupported = codexModelSupportsSpeed(currentModel);
-  const refreshModes = url.searchParams.get('refreshModes') === '1' || url.searchParams.get('modeOptions') === 'refresh';
-  const liveModeOptions = refreshModes ? await readLiveCodexModeOptionsBounded({ force: true }) : cachedLiveModeOptions();
+  const liveModeOptions = cachedLiveModeOptions();
   const modelOptions = modelOptionsForClient(liveModeOptions);
   const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
     ? liveModeOptions.reasoningOptions
@@ -7431,16 +8033,6 @@ function getLanUrls() {
   return [...urls];
 }
 
-async function warmCodexModeOptionsAfterStart() {
-  const value = await readLiveCodexModeOptionsBounded({ force: true });
-  const count = value && Array.isArray(value.modelOptions) ? value.modelOptions.length : 0;
-  if (count > 0) {
-    console.log(`Loaded ${count} Codex model option(s) from the client menu.`);
-  } else {
-    console.warn('Codex client model options were not available at startup; cached/local options will be used until the next refresh.');
-  }
-}
-
 function handleRequestError(error, req, res) {
   console.error('Request handler failed:', error && error.stack || error);
   if (res.headersSent) {
@@ -7454,31 +8046,236 @@ function handleRequestError(error, req, res) {
   });
 }
 
+class BufferedHttpResponse {
+  constructor() {
+    this.statusCode = 200;
+    this.headers = {};
+    this.chunks = [];
+    this.headersSent = false;
+    this.ended = false;
+  }
+
+  writeHead(statusCode, statusMessageOrHeaders, maybeHeaders) {
+    this.statusCode = Number(statusCode) || 200;
+    const headers = typeof statusMessageOrHeaders === 'object' && statusMessageOrHeaders !== null
+      ? statusMessageOrHeaders
+      : maybeHeaders;
+    this.headers = { ...(headers || {}) };
+    this.headersSent = true;
+    return this;
+  }
+
+  write(chunk) {
+    if (chunk !== undefined && chunk !== null) this.chunks.push(Buffer.from(chunk));
+    return true;
+  }
+
+  end(chunk) {
+    this.write(chunk);
+    this.ended = true;
+    return this;
+  }
+
+  flush(res) {
+    if (res.headersSent) return;
+    res.writeHead(this.statusCode, this.headers);
+    res.end(Buffer.concat(this.chunks));
+  }
+}
+
+function uiRouteMutationContext(req, payload = {}, desktopThreadId = '') {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const pathname = url.pathname;
+  const requestedThreadId = typeof payload.threadId === 'string'
+    ? payload.threadId.trim()
+    : url.searchParams.get('threadId') || '';
+  let action = '';
+  let access = 'mutating';
+
+  if (pathname === '/send') {
+    if (payload.target !== 'codex') {
+      const error = new Error('Only explicit Codex-targeted sends are supported.');
+      error.code = 'UNSUPPORTED_SEND_TARGET';
+      error.statusCode = 400;
+      throw error;
+    }
+    action = 'turn.start';
+  } else if (pathname === '/codex/select') {
+    action = 'thread.openDesktop';
+  } else if (pathname === '/codex/new-thread') {
+    action = 'thread.start';
+  } else if (pathname === '/codex/thread-action') {
+    const threadAction = String(payload.action || '').trim().toLowerCase();
+    action = ({
+      archive: 'thread.archive',
+      rename: 'thread.rename',
+      pin: 'thread.pin',
+      unpin: 'thread.unpin',
+    })[threadAction] || '';
+  } else if (pathname === '/codex/composer-plus-menu') {
+    action = 'composer.plus';
+    access = 'readOnly';
+  } else if (pathname === '/codex/composer-action') {
+    const composerAction = String(payload.action || '').trim().toLowerCase();
+    action = composerAction === 'compact'
+      ? 'thread.compact'
+      : composerAction === 'plugin'
+        ? 'composer.plugin'
+        : composerAction === 'remove-plus-menu-item'
+          ? 'composer.remove'
+          : 'composer.plus';
+  } else if (pathname === '/codex/model-switch') {
+    action = 'control.model';
+  } else if (pathname === '/codex/reasoning-mode') {
+    action = 'control.reasoning';
+  } else if (pathname === '/codex/speed-mode') {
+    action = 'control.serviceTier';
+  } else if (pathname === '/codex/stop') {
+    action = 'turn.interrupt';
+  } else if (pathname === '/codex/control-port') {
+    action = 'control.enable';
+  }
+
+  if (!action) return null;
+  const threadId = requestedThreadId || desktopThreadId || 'desktop-current';
+  return {
+    action,
+    access,
+    threadId,
+    resolveTargetFromObserved: !requestedThreadId && !desktopThreadId,
+    requireObservedTargetMatch: !requestedThreadId && action !== 'control.enable',
+  };
+}
+
+async function runExplicitUiHttpAction(req, res, handler) {
+  if (!isAuthorized(req)) return handler(req, res);
+
+  let payload = {};
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    try {
+      payload = JSON.parse(await readBody(req) || '{}');
+    } catch {
+      return handler(req, res);
+    }
+  }
+
+  const context = uiRouteMutationContext(req, payload);
+  if (!context) return handler(req, res);
+
+  const intent = createExplicitUiIntent({
+    id: crypto.randomUUID(),
+    action: context.action,
+    threadId: context.threadId,
+  });
+  const buffered = new BufferedHttpResponse();
+  await uiActionTransaction.run({
+    ...context,
+    intent,
+    background: false,
+  }, async ({ window, signal, fence }) => explicitUiActionStorage.run(
+    { windowHandle: window.handle, signal, fence },
+    () => handler(req, buffered, { signal, fence }),
+  ));
+  buffered.flush(res);
+}
+
+async function runExplicitProcessControlHttpAction(req, res) {
+  if (!isAuthorized(req)) return handleControlPort(req, res);
+
+  let payload = {};
+  try {
+    payload = JSON.parse(await readBody(req) || '{}');
+  } catch (error) {
+    return json(res, Number(error && error.status) || 400, {
+      ok: false,
+      code: Number(error && error.status) === 413 ? 'REQUEST_TOO_LARGE' : 'BAD_REQUEST',
+      message: String(error && error.message || 'Invalid process control request.'),
+    });
+  }
+
+  const requestedThreadId = typeof payload.threadId === 'string' ? payload.threadId.trim() : '';
+  const threadId = requestedThreadId || 'desktop-control';
+  const intent = createExplicitUiIntent({
+    id: crypto.randomUUID(),
+    action: 'control.enable',
+    threadId,
+  });
+  const outcome = await explicitProcessControlTransaction.run({
+    action: 'control.enable',
+    threadId,
+    desktopThreadId: '',
+    observedThreadId: '',
+    intent,
+    background: false,
+  }, async ({ signal, fence }) => explicitUiActionStorage.run(
+    { signal, fence, processControl: true },
+    () => resolveControlPortState(payload, {
+      refreshModeOptions: true,
+      captureProcessControlReplacement: true,
+      signal,
+    }),
+  ));
+  return json(res, 200, {
+    ok: true,
+    ready: true,
+    ...outcome.value,
+    permissions: [...CODEX_CONTROL_PERMISSIONS],
+    processControl: outcome.processControl,
+  });
+}
+
+function handleExplicitProcessControlRequest(req, res) {
+  return runExplicitProcessControlHttpAction(req, res).catch(error => {
+    if (res.headersSent) throw error;
+    return json(res, Number(error && (error.statusCode || error.status)) || 500, {
+      ok: false,
+      code: String(error && error.code || 'UI_PROCESS_CONTROL_FAILED'),
+      message: String(error && error.message || 'Explicit Codex process control failed.'),
+    });
+  });
+}
+
+function handleExplicitUiRequest(req, res, handler) {
+  return runExplicitUiHttpAction(req, res, handler).catch(error => {
+    if (res.headersSent) throw error;
+    return json(res, Number(error && (error.statusCode || error.status)) || 500, {
+      ok: false,
+      code: String(error && error.code || 'UI_ACTION_FAILED'),
+      message: String(error && error.message || 'Explicit Codex UI action failed.'),
+    });
+  });
+}
+
 async function dispatchRequest(req, res) {
+  const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
   if (req.method === 'OPTIONS') return options(res);
+  if (req.url.startsWith('/codex/v3/') || req.url.startsWith('/codex/thread-input')) {
+    return handleV3ApiRequest(req, res);
+  }
   if (req.method === 'GET' && req.url.startsWith('/codex/health')) return handleHealth(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/config')) return handleClientConfig(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/sakura/status')) return handleSakuraStatus(req, res);
   if (req.method === 'POST' && req.url.startsWith('/codex/sakura/config')) return handleSakuraConfig(req, res);
   if (req.method === 'POST' && req.url.startsWith('/codex/sakura/reconcile')) return handleSakuraReconcile(req, res);
   if (req.url.startsWith('/codex/sakura/discover')) return json(res, 404, { ok: false, code: 'NOT_FOUND', message: '远程链接自动检测已移除，请手动填写链接和端口。' });
-  if (req.method === 'POST' && req.url.startsWith('/send')) return handleSend(req, res);
+  if (req.method === 'POST' && pathname === '/send') return handleExplicitUiRequest(req, res, handleSend);
   if (req.method === 'GET' && req.url.startsWith('/codex/threads')) return handleThreads(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/foreground-notices')) return handleForegroundNotices(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/history')) return handleThreadHistory(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/attachment')) return handleAttachment(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/status')) return handleCodexStatus(req, res);
   if ((req.method === 'GET' || req.method === 'POST') && req.url.startsWith('/codex/keep-awake')) return handleKeepAwake(req, res);
-  if ((req.method === 'GET' || req.method === 'POST') && req.url.startsWith('/codex/control-port')) return handleControlPort(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/select')) return handleSelectThread(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/new-thread')) return handleNewCodexThread(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/thread-action')) return handleThreadAction(req, res);
-  if (req.method === 'GET' && req.url.startsWith('/codex/composer-plus-menu')) return handleComposerPlusMenu(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/composer-action')) return handleComposerAction(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/model-switch')) return handleModelSwitch(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/reasoning-mode')) return handleReasoningMode(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/speed-mode')) return handleSpeedMode(req, res);
-  if (req.method === 'POST' && req.url.startsWith('/codex/stop')) return handleStopCodex(req, res);
+  if (req.method === 'GET' && pathname === '/codex/control-port') return handleControlPort(req, res);
+  if (req.method === 'POST' && pathname === '/codex/control-port') return handleExplicitProcessControlRequest(req, res);
+  if (req.method === 'POST' && pathname === '/codex/select') return handleExplicitUiRequest(req, res, handleSelectThread);
+  if (req.method === 'POST' && pathname === '/codex/new-thread') return handleExplicitUiRequest(req, res, handleNewCodexThread);
+  if (req.method === 'POST' && pathname === '/codex/thread-action') return handleExplicitUiRequest(req, res, handleThreadAction);
+  if (req.method === 'GET' && pathname === '/codex/composer-plus-menu') return handleExplicitUiRequest(req, res, handleComposerPlusMenu);
+  if (req.method === 'POST' && pathname === '/codex/composer-action') return handleExplicitUiRequest(req, res, handleComposerAction);
+  if (req.method === 'POST' && pathname === '/codex/model-switch') return handleExplicitUiRequest(req, res, handleModelSwitch);
+  if (req.method === 'POST' && pathname === '/codex/reasoning-mode') return handleExplicitUiRequest(req, res, handleReasoningMode);
+  if (req.method === 'POST' && pathname === '/codex/speed-mode') return handleExplicitUiRequest(req, res, handleSpeedMode);
+  if (req.method === 'POST' && pathname === '/codex/stop') return handleExplicitUiRequest(req, res, handleStopCodex);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
   json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed' });
 }
@@ -7487,25 +8284,72 @@ const server = http.createServer((req, res) => {
   Promise.resolve(dispatchRequest(req, res)).catch(error => handleRequestError(error, req, res));
 });
 
+function stopV3Runtime() {
+  if (v3QueueDispatchTimer !== null) {
+    clearInterval(v3QueueDispatchTimer);
+    v3QueueDispatchTimer = null;
+  }
+  try { v3Bridge.eventRuntime.stop(); } catch {}
+  try { v3Bridge.runtime.stop('SIGTERM'); } catch {}
+}
+
+async function flushQueuedThreads() {
+  if (!v3Bridge.queue) return;
+  const threadIds = [...new Set(v3Bridge.queue.list()
+    .filter(item => item && item.state === 'queued')
+    .map(item => String(item.threadId || ''))
+    .filter(Boolean))];
+  await Promise.all(threadIds.map(async threadId => {
+    if (v3QueueDispatchingThreads.has(threadId)) return;
+    v3QueueDispatchingThreads.add(threadId);
+    try {
+      const result = await v3ApiRouter.handle({
+        method: 'POST',
+        url: `/codex/v3/threads/${encodeURIComponent(threadId)}/queue/flush`,
+        body: {},
+      });
+      if (result && result.statusCode >= 500) {
+        console.warn('Queued turn dispatch deferred:', result.body?.error?.code || result.statusCode);
+      }
+    } catch (error) {
+      console.warn('Queued turn dispatch deferred:', error && error.code || 'QUEUE_DISPATCH_FAILED');
+    } finally {
+      v3QueueDispatchingThreads.delete(threadId);
+    }
+  }));
+}
+
+function startV3QueueDispatchTimer() {
+  if (!v3Bridge.queue || v3QueueDispatchTimer !== null) return;
+  v3QueueDispatchTimer = setInterval(() => {
+    flushQueuedThreads().catch(() => {});
+  }, 1500);
+  if (typeof v3QueueDispatchTimer.unref === 'function') v3QueueDispatchTimer.unref();
+}
+
 server.listen(PORT, HOST, () => {
+  v3Bridge.eventRuntime.start();
+  startV3QueueDispatchTimer();
   const urls = getLanUrls();
   console.log('\nCodex2Frp is running.');
   console.log('Keep Codex2Frp running, then open one of these URLs in a phone or browser:');
   for (const url of urls) console.log(`  ${url}`);
   console.log('\nTip: use the same LAN for local access; use the remote URL for off-LAN access.\n');
-  warmCodexModeOptionsAfterStart().catch(error => {
-    console.warn('Codex client model option warm-up failed:', error && error.message || error);
-  });
 });
 
-process.on('exit', cleanupKeepAwake);
+process.on('exit', () => {
+  cleanupKeepAwake();
+  stopV3Runtime();
+});
 process.on('SIGINT', () => {
   cleanupKeepAwake();
+  stopV3Runtime();
   stopPushWatchTimer();
   process.exit(130);
 });
 process.on('SIGTERM', () => {
   cleanupKeepAwake();
+  stopV3Runtime();
   stopPushWatchTimer();
   process.exit(143);
 });

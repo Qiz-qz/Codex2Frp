@@ -2,7 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.2.0`.
+Current version: `v1.3.0`.
+
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.3.0 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -25,7 +27,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.2.0/              Latest public installer release
+release/v1.3.0/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -34,25 +36,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.2.0/Codex2FrpSetup-v1.2.0.exe
+release/v1.3.0/Codex2FrpSetup-v1.3.0.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.2.0/SHA256SUMS.txt
+release/v1.3.0/SHA256SUMS.txt
 ```
 
 The current SHA-256 is:
 
 ```text
-f2fa0be4449ce70509624392b1681d9ece0a239ab07f335063f63385f9600843  Codex2FrpSetup-v1.2.0.exe
+bd48da5f1d47b4dd471acdc811734bc7dc690fb74cadcc00ba5d9ba4bdacda7a  Codex2FrpSetup-v1.3.0.exe
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.2.0.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.3.0.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -180,6 +182,13 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.3.0
+
+- Adapts the public backend to the current Codex app-server protocol with fail-closed schema compatibility checks and expanded structured message types.
+- Adds a durable next-turn queue with safe first-turn dispatch, idempotency, reconciliation, concurrent flush coalescing, and DPAPI-protected persistence.
+- Keeps background synchronization focus-free and restores the original Codex window placement, minimized state, and foreground focus after explicit mobile actions.
+- Exposes allowlisted operation and tool metadata while excluding raw bodies, arguments, outputs, payloads, local paths, child sessions, and inter-agent messages. Subagents expose only a sanitized name and lifecycle state.
 
 ### v1.2.0
 

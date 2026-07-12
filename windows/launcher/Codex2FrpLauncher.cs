@@ -19,7 +19,7 @@ namespace Codex2FrpLauncher
     internal static class Program
     {
         internal const string AppDisplayName = "Codex2Frp";
-        internal const string AppVersion = "1.2.0";
+        internal const string AppVersion = "1.3.0";
         internal const int ServicePort = 8988;
         internal const string ServicePortDisplay = "8988";
         internal const string DefaultSakuraDomain = "";
@@ -238,6 +238,11 @@ namespace Codex2FrpLauncher
                 }
                 catch { }
             }
+        }
+
+        internal static bool IsOwnedBackendProcess(Process process, string installDir)
+        {
+            return process != null && LooksLikeCodexServerProcess(process, installDir);
         }
 
         private static bool LooksLikeCodexServerProcess(Process process, string installDir)
@@ -1663,7 +1668,8 @@ namespace Codex2FrpLauncher
                     if (int.TryParse(raw, out pid))
                     {
                         Process process = Process.GetProcessById(pid);
-                        if (!process.HasExited) return process;
+                        if (!process.HasExited && Program.IsOwnedBackendProcess(process, _paths.ProjectRoot)) return process;
+                        TryDelete(_paths.PidPath);
                     }
                 }
             }

@@ -37,10 +37,10 @@ function Find-CodexExe {
   if ($env:CODEX_DESKTOP_EXECUTABLE_PATH) { $candidates += $env:CODEX_DESKTOP_EXECUTABLE_PATH }
 
   try {
-    $runningDesktop = Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
+    $runningDesktop = Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe'" |
       Where-Object {
         $exe = [string]$_.ExecutablePath
-        $exe -and (($exe -replace '/', '\') -match '\\app\\Codex\.exe$')
+        $exe -and (($exe -replace '/', '\') -match '\\app\\(ChatGPT|Codex)\.exe$')
       } |
       Select-Object -First 1 -ExpandProperty ExecutablePath
     if ($runningDesktop) { $candidates += $runningDesktop }
@@ -51,6 +51,7 @@ function Find-CodexExe {
     $packages = @(Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction SilentlyContinue)
     foreach ($package in $packages) {
       if ($package.InstallLocation) {
+        $candidates += Join-Path $package.InstallLocation "app\ChatGPT.exe"
         $candidates += Join-Path $package.InstallLocation "app\Codex.exe"
       }
     }
@@ -162,7 +163,7 @@ function Start-CodexDesktop {
   )
 
   $normalized = ([string]$ExecutablePath) -replace '/', '\'
-  if ($normalized -match '\\WindowsApps\\OpenAI\.Codex_[^\\]+\\app\\Codex\.exe$') {
+  if ($normalized -match '\\WindowsApps\\OpenAI\.Codex_[^\\]+\\app\\(ChatGPT|Codex)\.exe$') {
     $aumid = Get-CodexAumid
     Start-CodexPackagedApp -Aumid $aumid -Arguments $Arguments
     return
@@ -173,11 +174,11 @@ function Start-CodexDesktop {
 
 function Get-CodexProcessCommandLines {
   try {
-    return @(Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
+    return @(Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe'" |
       Where-Object {
         $exe = [string]$_.ExecutablePath
         $cmd = [string]$_.CommandLine
-        $exe -and (($exe -replace '/', '\') -match '\\app\\Codex\.exe$') -and
+        $exe -and (($exe -replace '/', '\') -match '\\app\\(ChatGPT|Codex)\.exe$') -and
           $cmd -and ($cmd -notmatch '\s--type=')
       } |
       Select-Object -ExpandProperty CommandLine |
@@ -189,11 +190,11 @@ function Get-CodexProcessCommandLines {
 
 function Get-CodexCdpProcessPorts {
   try {
-    $ports = @(Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
+    $ports = @(Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe'" |
       Where-Object {
         $exe = [string]$_.ExecutablePath
         $cmd = [string]$_.CommandLine
-        $exe -and (($exe -replace '/', '\') -match '\\app\\Codex\.exe$') -and
+        $exe -and (($exe -replace '/', '\') -match '\\app\\(ChatGPT|Codex)\.exe$') -and
           $cmd -and ($cmd -notmatch '\s--type=') -and
           ($cmd -match '--remote-debugging-port=(\d+)')
       } |
@@ -216,7 +217,7 @@ function Stop-StaleCodexCdpProcesses {
 
   $normalizedProfile = ([string]$ProfileDir) -replace '/', '\'
   try {
-    $targets = @(Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
+    $targets = @(Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe'" |
       Where-Object {
         $command = [string]$_.CommandLine
         if (-not $command) { return $false }
@@ -245,10 +246,10 @@ function Stop-StaleCodexCdpProcesses {
 
 function Stop-CodexDesktopProcesses {
   try {
-    $targets = @(Get-CimInstance Win32_Process -Filter "name = 'Codex.exe'" |
+    $targets = @(Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe'" |
       Where-Object {
         $exe = [string]$_.ExecutablePath
-        $exe -and (($exe -replace '/', '\') -match '\\app\\Codex\.exe$')
+        $exe -and (($exe -replace '/', '\') -match '\\app\\(ChatGPT|Codex)\.exe$')
       })
     $mainTargets = @($targets | Where-Object {
       $command = [string]$_.CommandLine
@@ -279,7 +280,7 @@ if (-not $OpenAfterPrepare) {
     $aumid = Get-CodexAumid
     if ($aumid) { Write-Host "Appx AUMID: $aumid" }
   } else {
-    Write-Host "Prepared Windows Codex CDP launcher, but Codex.exe was not found"
+    Write-Host "Prepared Windows Codex CDP launcher, but ChatGPT.exe/Codex.exe was not found"
     Write-Host "Pass -CodexExe or set CODEX_DESKTOP_EXECUTABLE_PATH before opening"
   }
   exit 0
@@ -340,7 +341,7 @@ if ($runningCommands.Count -gt 0) {
 }
 
 if (-not $codexPath) {
-  [Console]::Error.WriteLine("Codex.exe was not found. Pass -CodexExe or set CODEX_DESKTOP_EXECUTABLE_PATH.")
+  [Console]::Error.WriteLine("ChatGPT.exe/Codex.exe was not found. Pass -CodexExe or set CODEX_DESKTOP_EXECUTABLE_PATH.")
   exit 1
 }
 
