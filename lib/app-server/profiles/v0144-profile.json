@@ -1,0 +1,46 @@
+{
+  "id": "app-server-v0144",
+  "schemaVersion": "0.144.0-alpha.4",
+  "schema": {
+    "file": "codex_app_server_protocol.schemas.json",
+    "sha256": "85ea836927d6cfdd3c68a9bda17dba48d2573bbc282ab2d5775a5005e40bc9c3"
+  },
+  "initialize": {
+    "platformFamilies": ["windows"],
+    "platformOs": ["windows"],
+    "userAgentPattern": "^(?:(?:codex_cli_rs|codex-cli)[/ ]|Codex Desktop/)0\\.144\\.0-alpha\\.4(?:\\s|$|\\()"
+  },
+  "requiredRequestMethods": [
+    "initialize",
+    "thread/list",
+    "thread/read",
+    "thread/turns/list",
+    "thread/start",
+    "thread/resume",
+    "thread/fork",
+    "thread/archive",
+    "thread/unarchive",
+    "thread/name/set",
+    "thread/compact/start",
+    "thread/settings/update",
+    "turn/start",
+    "turn/interrupt",
+    "turn/steer",
+    "model/list",
+    "collaborationMode/list"
+  ],
+  "requiredNotificationMethods": [
+    "thread/started",
+    "thread/status/changed",
+    "thread/archived",
+    "thread/unarchived",
+    "thread/name/updated",
+    "thread/settings/updated",
+    "thread/compacted",
+    "turn/started",
+    "turn/completed",
+    "turn/plan/updated",
+    "item/started",
+    "item/completed"
+  ]
+}

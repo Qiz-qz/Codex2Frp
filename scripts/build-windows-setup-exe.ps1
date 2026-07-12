@@ -59,7 +59,8 @@ $items = @(
 $scriptItems = @(
   "start-windows-local.ps1",
   "launch-main-codex-cdp.ps1",
-  "server-log-bootstrap.js"
+  "server-log-bootstrap.js",
+  "installed-readonly-smoke.ps1"
 )
 
 foreach ($item in $items) {
@@ -168,7 +169,12 @@ if ($outputItem.LastWriteTime -lt $BuildStamp.AddSeconds(-2)) {
 }
 
 $VersionedOutput = Join-Path $DistDir ("Codex2FrpSetup-v$Version.exe")
-Copy-Item -LiteralPath $Output -Destination $VersionedOutput -Force
+if (-not [System.IO.Path]::GetFullPath($Output).Equals(
+  [System.IO.Path]::GetFullPath($VersionedOutput),
+  [System.StringComparison]::OrdinalIgnoreCase
+)) {
+  Copy-Item -LiteralPath $Output -Destination $VersionedOutput -Force
+}
 
 Write-Output "Built $Output"
 Write-Output "Built $VersionedOutput"

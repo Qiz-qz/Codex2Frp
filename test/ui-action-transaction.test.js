@@ -1,0 +1,740 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { createProtectedThreadGuard } = require('../lib/control/protected-thread-guard');
+const {
+  UiActionCircuitBreaker,
+  ExplicitProcessControlTransaction,
+  UiActionTransaction,
+  attachProcessControlReplacement,
+  createExplicitUiIntent,
+} = require('../lib/control/ui-action-transaction');
+const { WINDOW_SHOW_STATES } = require('../lib/windows/window-session');
+
+const TEST_THREAD = '11111111-2222-4333-8444-555555555555';
+const PROTECTED_THREAD = '019f4840-00df-7ee0-88cb-e3dbcb1871dc';
+
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function createWin32Adapter(options = {}) {
+  const targetWindow = 'codex-window';
+  let foreground = options.foreground || 'editor-window';
+  const placements = new Map([[targetWindow, clone(options.placement || {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 0,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 },
+  })]]);
+  const validWindows = new Set(['editor-window', targetWindow]);
+  const events = [];
+
+  return {
+    events,
+    listTopLevelWindows() {
+      events.push({ type: 'listTopLevelWindows' });
+      return [{
+        handle: targetWindow,
+        processId: 300,
+        processName: 'ChatGPT.exe',
+        title: 'Codex',
+        visible: true,
+        ownerHandle: null,
+      }];
+    },
+    getForegroundWindow() {
+      events.push({ type: 'getForegroundWindow', handle: foreground });
+      return foreground;
+    },
+    getWindowPlacement(handle) {
+      events.push({ type: 'getWindowPlacement', handle });
+      return clone(placements.get(handle));
+    },
+    setWindowPlacement(handle, placement) {
+      events.push({ type: 'setWindowPlacement', handle, placement: clone(placement) });
+      placements.set(handle, clone(placement));
+    },
+    activateWindow(handle) {
+      events.push({ type: 'activateWindow', handle });
+      foreground = handle;
+      const placement = placements.get(handle);
+      placements.set(handle, { ...clone(placement), showState: WINDOW_SHOW_STATES.NORMAL });
+    },
+    setForegroundWindow(handle) {
+      events.push({ type: 'setForegroundWindow', handle });
+      foreground = handle;
+    },
+    isWindow(handle) {
+      return validWindows.has(handle);
+    },
+    simulatePlacement(placement) {
+      placements.set(targetWindow, clone(placement));
+      events.push({ type: 'simulatePlacement', placement: clone(placement) });
+    },
+    currentForeground() {
+      return foreground;
+    },
+    targetPlacement() {
+      return clone(placements.get(targetWindow));
+    },
+  };
+}
+
+function createTransaction(adapter, options = {}) {
+  return new UiActionTransaction({
+    adapter,
+    guard: options.guard || createProtectedThreadGuard(),
+    timeoutMs: options.timeoutMs || 100,
+    timeoutGraceMs: options.timeoutGraceMs,
+    circuitBreaker: options.circuitBreaker,
+    resolveObservedThread: options.resolveObservedThread,
+  });
+}
+
+function context(intent, overrides = {}) {
+  return {
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+    desktopThreadId: TEST_THREAD,
+    intent,
+    ...overrides,
+  };
+}
+
+function createRestartingAdapter(options = {}) {
+  const events = [];
+  let codexWindow = 'codex-old';
+  let codexProcessId = 500;
+  let foreground = options.foreground || 'editor-window';
+  const validWindows = new Set(['editor-window', 'browser-window', codexWindow]);
+  const placements = new Map([[codexWindow, clone(options.placement || {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 7,
+    normalPosition: { left: 120, top: 80, right: 1320, bottom: 880 },
+  })]]);
+  return {
+    events,
+    listTopLevelWindows() {
+      events.push({ type: 'listTopLevelWindows' });
+      return codexWindow ? [{
+        handle: codexWindow,
+        processId: codexProcessId,
+        processName: 'ChatGPT.exe',
+        title: 'Codex',
+        visible: true,
+        ownerHandle: null,
+      }] : [];
+    },
+    getForegroundWindow() {
+      events.push({ type: 'getForegroundWindow', handle: foreground });
+      return foreground;
+    },
+    getWindowPlacement(handle) {
+      events.push({ type: 'getWindowPlacement', handle });
+      return clone(placements.get(handle));
+    },
+    setWindowPlacement(handle, placement) {
+      events.push({ type: 'setWindowPlacement', handle, placement: clone(placement) });
+      placements.set(handle, clone(placement));
+      return true;
+    },
+    activateWindow(handle) {
+      events.push({ type: 'activateWindow', handle });
+      foreground = handle;
+      return true;
+    },
+    setForegroundWindow(handle) {
+      events.push({ type: 'setForegroundWindow', handle });
+      foreground = handle;
+      return true;
+    },
+    isWindow(handle) {
+      return validWindows.has(handle);
+    },
+    restartCodex(newHandle = 'codex-new', processId = 501) {
+      validWindows.delete(codexWindow);
+      codexWindow = newHandle;
+      codexProcessId = processId;
+      validWindows.add(newHandle);
+      placements.set(newHandle, {
+        showState: WINDOW_SHOW_STATES.NORMAL,
+        flags: 0,
+        normalPosition: { left: 0, top: 0, right: 800, bottom: 600 },
+      });
+      foreground = newHandle;
+      events.push({ type: 'restartCodex', handle: newHandle });
+    },
+    removeCodexWindow() {
+      validWindows.delete(codexWindow);
+      codexWindow = '';
+    },
+    simulateUserFocus(handle) {
+      foreground = handle;
+      events.push({ type: 'simulateUserFocus', handle });
+    },
+    currentForeground() { return foreground; },
+    placementOf(handle) { return clone(placements.get(handle)); },
+  };
+}
+
+test('only a branded explicit intent enters a UI transaction and it can be consumed once', async () => {
+  const adapter = createWin32Adapter();
+  const transaction = createTransaction(adapter);
+
+  await assert.rejects(
+    transaction.run(context({ id: 'plain-object' }), async () => 'never'),
+    error => {
+      assert.equal(error.code, 'UI_EXPLICIT_INTENT_REQUIRED');
+      return true;
+    },
+  );
+  assert.equal(adapter.events.length, 0);
+
+  const intent = createExplicitUiIntent({ id: 'intent-once', action: 'composer.plus', threadId: TEST_THREAD });
+  assert.equal(await transaction.run(context(intent), async ({ window }) => window.handle), 'codex-window');
+  await assert.rejects(transaction.run(context(intent), async () => 'never'), error => {
+    assert.equal(error.code, 'UI_EXPLICIT_INTENT_CONSUMED');
+    return true;
+  });
+  assert.equal(adapter.events.filter(event => event.type === 'activateWindow').length, 1);
+});
+
+test('the default UI lock serializes transactions globally across coordinator instances', async () => {
+  const adapter = createWin32Adapter({ placement: {
+    showState: WINDOW_SHOW_STATES.NORMAL,
+    flags: 0,
+    normalPosition: { left: 20, top: 20, right: 1020, bottom: 720 },
+  } });
+  const firstTransaction = createTransaction(adapter);
+  const secondTransaction = createTransaction(adapter);
+  const sequence = [];
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+
+  const first = firstTransaction.run(context(createExplicitUiIntent({
+    id: 'intent-lock-1',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => {
+    sequence.push('first-start');
+    await firstGate;
+    sequence.push('first-end');
+  });
+  const second = secondTransaction.run(context(createExplicitUiIntent({
+    id: 'intent-lock-2',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => {
+    sequence.push('second-start');
+    sequence.push('second-end');
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sequence, ['first-start']);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(sequence, ['first-start', 'first-end', 'second-start', 'second-end']);
+
+  const activationIndexes = adapter.events
+    .map((event, index) => event.type === 'activateWindow' ? index : -1)
+    .filter(index => index >= 0);
+  assert.equal(activationIndexes.length, 2);
+  assert.equal(
+    adapter.events.slice(activationIndexes[0] + 1, activationIndexes[1])
+      .some(event => event.type === 'setWindowPlacement'),
+    true,
+  );
+});
+
+test('protected tasks are rejected before discovery, capture, or activation', async () => {
+  const adapter = createWin32Adapter();
+  const transaction = createTransaction(adapter, {
+    guard: createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] }),
+  });
+  const intent = createExplicitUiIntent({
+    id: 'intent-protected',
+    action: 'composer.plus',
+    threadId: PROTECTED_THREAD,
+  });
+
+  await assert.rejects(transaction.run(context(intent, {
+    threadId: PROTECTED_THREAD,
+    desktopThreadId: PROTECTED_THREAD,
+  }), async () => 'never'), error => {
+    assert.equal(error.code, 'PROTECTED_THREAD');
+    return true;
+  });
+  assert.deepEqual(adapter.events, []);
+});
+
+test('background actions cannot enter or consume an explicit UI transaction', async () => {
+  const adapter = createWin32Adapter();
+  const transaction = createTransaction(adapter);
+  const intent = createExplicitUiIntent({
+    id: 'intent-background',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  });
+
+  await assert.rejects(transaction.run(context(intent, { background: true }), async () => 'never'), error => {
+    assert.equal(error.code, 'UI_BACKGROUND_ACTION_FORBIDDEN');
+    return true;
+  });
+  assert.deepEqual(adapter.events, []);
+  assert.equal(await transaction.run(context(intent), async () => 'foreground-ok'), 'foreground-ok');
+});
+
+test('action errors still restore the original placement and foreground in finally', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MAXIMIZED,
+    flags: 0,
+    normalPosition: { left: 40, top: 30, right: 1240, bottom: 830 },
+  };
+  const adapter = createWin32Adapter({ placement: originalPlacement });
+  const transaction = createTransaction(adapter);
+  const failure = new Error('UI action failed');
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-error',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => {
+    adapter.simulatePlacement({
+      showState: WINDOW_SHOW_STATES.NORMAL,
+      flags: 9,
+      normalPosition: { left: 0, top: 0, right: 600, bottom: 400 },
+    });
+    throw failure;
+  }), error => error === failure);
+
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('activation errors still restore the captured placement and foreground', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 0,
+    normalPosition: { left: 90, top: 70, right: 1190, bottom: 770 },
+  };
+  const adapter = createWin32Adapter({ placement: originalPlacement });
+  const activate = adapter.activateWindow.bind(adapter);
+  const activationFailure = new Error('native activation failed');
+  adapter.activateWindow = handle => {
+    activate(handle);
+    throw activationFailure;
+  };
+  const transaction = createTransaction(adapter);
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-activation-error',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => 'must-not-run'), error => error === activationFailure);
+
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('a rejected native activation never runs the UI operation and still restores state', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MAXIMIZED,
+    flags: 0,
+    normalPosition: { left: 30, top: 20, right: 1430, bottom: 920 },
+  };
+  const adapter = createWin32Adapter({ placement: originalPlacement });
+  const activate = adapter.activateWindow.bind(adapter);
+  adapter.activateWindow = handle => {
+    activate(handle);
+    return false;
+  };
+  const transaction = createTransaction(adapter);
+  let operationRan = false;
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-activation-rejected',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => {
+    operationRan = true;
+  }), error => {
+    assert.equal(error.code, 'UI_WINDOW_ACTIVATION_FAILED');
+    return true;
+  });
+
+  assert.equal(operationRan, false);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('placement restore failures still attempt foreground restore and surface a state error', async () => {
+  const adapter = createWin32Adapter();
+  adapter.setWindowPlacement = () => {
+    throw new Error('native placement restore failed');
+  };
+  const transaction = createTransaction(adapter);
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-placement-restore-error',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => 'operation-complete'), error => {
+    assert.equal(error.code, 'UI_STATE_RESTORE_FAILED');
+    assert.equal(error.details.targetPlacementRestored, false);
+    assert.equal(error.details.foregroundRestored, true);
+    return true;
+  });
+
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('foreground restore rejection is surfaced instead of reporting a successful UI action', async () => {
+  const adapter = createWin32Adapter();
+  adapter.setForegroundWindow = () => false;
+  const transaction = createTransaction(adapter);
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-foreground-restore-error',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => 'operation-complete'), error => {
+    assert.equal(error.code, 'UI_STATE_RESTORE_FAILED');
+    assert.equal(error.details.targetPlacementRestored, true);
+    assert.equal(error.details.foregroundRestored, false);
+    return true;
+  });
+});
+
+test('an unobservable post-action foreground fails closed without reclaiming focus', async () => {
+  const adapter = createWin32Adapter();
+  const getForegroundWindow = adapter.getForegroundWindow.bind(adapter);
+  let foregroundReads = 0;
+  adapter.getForegroundWindow = () => {
+    foregroundReads += 1;
+    if (foregroundReads > 1) throw new Error('foreground observation unavailable');
+    return getForegroundWindow();
+  };
+  const transaction = createTransaction(adapter);
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-foreground-observation-error',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => 'operation-complete'), error => {
+    assert.equal(error.code, 'UI_STATE_RESTORE_FAILED');
+    assert.deepEqual(error.details.restoreErrors, ['foreground-capture']);
+    return true;
+  });
+
+  assert.equal(
+    adapter.events.some(event => event.type === 'setForegroundWindow'),
+    false,
+  );
+});
+
+test('action timeout aborts the operation and restores placement and foreground in finally', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 0,
+    normalPosition: { left: 70, top: 50, right: 1170, bottom: 750 },
+  };
+  const adapter = createWin32Adapter({ placement: originalPlacement });
+  const transaction = createTransaction(adapter, { timeoutMs: 15 });
+  let actionSignal;
+
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-timeout',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async ({ signal }) => {
+    actionSignal = signal;
+    adapter.simulatePlacement({
+      showState: WINDOW_SHOW_STATES.NORMAL,
+      flags: 1,
+      normalPosition: { left: 0, top: 0, right: 500, bottom: 300 },
+    });
+    return new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }), error => {
+    assert.equal(error.code, 'UI_ACTION_TIMEOUT');
+    return true;
+  });
+
+  assert.equal(actionSignal.aborted, true);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('timeout keeps the global lock until an abort-ignoring operation settles and then restores late effects', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 0,
+    normalPosition: { left: 80, top: 60, right: 1180, bottom: 760 },
+  };
+  const adapter = createWin32Adapter({ placement: originalPlacement });
+  const firstTransaction = createTransaction(adapter, { timeoutMs: 15 });
+  const secondTransaction = createTransaction(adapter, { timeoutMs: 100 });
+  const sequence = [];
+  let actionSignal;
+  let releaseLateOperation;
+  const lateGate = new Promise(resolve => { releaseLateOperation = resolve; });
+
+  const first = firstTransaction.run(context(createExplicitUiIntent({
+    id: 'intent-timeout-late-effect',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async ({ signal }) => {
+    actionSignal = signal;
+    await lateGate;
+    adapter.simulatePlacement({
+      showState: WINDOW_SHOW_STATES.NORMAL,
+      flags: 99,
+      normalPosition: { left: 0, top: 0, right: 400, bottom: 300 },
+    });
+    sequence.push('late-effect');
+  }).catch(error => error);
+  const second = secondTransaction.run(context(createExplicitUiIntent({
+    id: 'intent-timeout-followup',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => {
+    sequence.push('second-start');
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(actionSignal.aborted, true);
+  assert.deepEqual(sequence, [], 'the next UI action remains locked while the timed-out operation can still mutate UI');
+  releaseLateOperation();
+  const timeoutError = await first;
+  await second;
+
+  assert.equal(timeoutError.code, 'UI_ACTION_TIMEOUT');
+  assert.deepEqual(sequence, ['late-effect', 'second-start']);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('an abort-ignoring operation enters bounded quarantine and later UI requests fail fast', async () => {
+  const adapter = createWin32Adapter();
+  const circuitBreaker = new UiActionCircuitBreaker();
+  const transaction = createTransaction(adapter, {
+    timeoutMs: 10,
+    timeoutGraceMs: 10,
+    circuitBreaker,
+  });
+  let fenceRejected = false;
+  const startedAt = Date.now();
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-never-settles',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async ({ signal, fence }) => {
+    signal.addEventListener('abort', () => {
+      assert.throws(() => fence.assertAllowed(), error => error.code === 'UI_ACTION_TIMEOUT');
+      fenceRejected = true;
+    }, { once: true });
+    return new Promise(() => {});
+  }), error => error.code === 'UI_ACTION_TIMEOUT');
+  assert.equal(Date.now() - startedAt < 150, true, 'timeout grace is bounded');
+  assert.equal(fenceRejected, true);
+
+  let followupRan = false;
+  const followupStartedAt = Date.now();
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-after-quarantine',
+    action: 'composer.plus',
+    threadId: TEST_THREAD,
+  })), async () => {
+    followupRan = true;
+  }), error => error.code === 'UI_ACTION_QUARANTINED');
+  assert.equal(Date.now() - followupStartedAt < 50, true, 'quarantined follow-up rejects without pending');
+  assert.equal(followupRan, false);
+});
+
+test('ordinary UI guard re-resolves the observed desktop task inside the global lock', async () => {
+  const adapter = createWin32Adapter();
+  const observations = [TEST_THREAD, PROTECTED_THREAD];
+  const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] });
+  const resolveObservedThread = async () => observations.shift() || PROTECTED_THREAD;
+  const firstTransaction = createTransaction(adapter, { guard, resolveObservedThread });
+  const secondTransaction = createTransaction(adapter, { guard, resolveObservedThread });
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  let secondRan = false;
+  const first = firstTransaction.run(context(createExplicitUiIntent({
+    id: 'intent-toctou-ui-first', action: 'composer.plus', threadId: TEST_THREAD,
+  })), async () => firstGate);
+  const second = secondTransaction.run(context(createExplicitUiIntent({
+    id: 'intent-toctou-ui-second', action: 'composer.plus', threadId: TEST_THREAD,
+  })), async () => { secondRan = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  releaseFirst();
+  await first;
+  await assert.rejects(second, error => error.code === 'PROTECTED_THREAD');
+  assert.equal(secondRan, false);
+});
+
+test('explicit process control rebinds restoration to a restarted Codex HWND without activating the old HWND', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 7,
+    normalPosition: { left: 120, top: 80, right: 1320, bottom: 880 },
+  };
+  const adapter = createRestartingAdapter({ placement: originalPlacement });
+  const transaction = new ExplicitProcessControlTransaction({
+    adapter,
+    guard: createProtectedThreadGuard(),
+    timeoutMs: 100,
+  });
+  const result = await transaction.run({
+    action: 'control.enable',
+    threadId: 'desktop-control',
+    desktopThreadId: '',
+    intent: createExplicitUiIntent({
+      id: 'intent-process-restart',
+      action: 'control.enable',
+      threadId: 'desktop-control',
+    }),
+  }, async ({ signal }) => {
+    assert.equal(signal.aborted, false);
+    adapter.restartCodex('codex-new', 501);
+    return attachProcessControlReplacement({ ready: true }, { processId: 501 });
+  });
+
+  assert.deepEqual(result, {
+    value: { ready: true },
+    processControl: {
+      targetRebound: true,
+      targetPlacementRestored: true,
+      foregroundRestored: true,
+      userFocusChanged: false,
+    },
+  });
+  assert.deepEqual(adapter.placementOf('codex-new'), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+  assert.equal(adapter.events.some(event => event.type === 'activateWindow'), false);
+  assert.equal(adapter.events.some(event => (
+    event.type === 'setWindowPlacement' && event.handle === 'codex-old'
+  )), false);
+});
+
+test('explicit process control is blocked before discovery for background and protected tasks', async () => {
+  const adapter = createRestartingAdapter();
+  const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] });
+  const transaction = new ExplicitProcessControlTransaction({ adapter, guard });
+
+  await assert.rejects(transaction.run({
+    action: 'control.enable',
+    threadId: TEST_THREAD,
+    background: true,
+    intent: createExplicitUiIntent({ id: 'process-background', action: 'control.enable', threadId: TEST_THREAD }),
+  }, async () => {}), error => error.code === 'UI_BACKGROUND_ACTION_FORBIDDEN');
+  await assert.rejects(transaction.run({
+    action: 'control.enable',
+    threadId: PROTECTED_THREAD,
+    desktopThreadId: PROTECTED_THREAD,
+    intent: createExplicitUiIntent({ id: 'process-protected', action: 'control.enable', threadId: PROTECTED_THREAD }),
+  }, async () => {}), error => error.code === 'PROTECTED_THREAD');
+
+  assert.deepEqual(adapter.events, []);
+});
+
+test('process control guard re-resolves the observed desktop task inside the global lock', async () => {
+  const adapter = createRestartingAdapter();
+  const observations = [TEST_THREAD, PROTECTED_THREAD];
+  const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] });
+  const options = {
+    adapter,
+    guard,
+    resolveObservedThread: async () => observations.shift() || PROTECTED_THREAD,
+  };
+  const firstTransaction = new ExplicitProcessControlTransaction(options);
+  const secondTransaction = new ExplicitProcessControlTransaction(options);
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  let secondRan = false;
+  const first = firstTransaction.run({
+    action: 'control.enable',
+    threadId: TEST_THREAD,
+    desktopThreadId: TEST_THREAD,
+    intent: createExplicitUiIntent({ id: 'intent-toctou-process-first', action: 'control.enable', threadId: TEST_THREAD }),
+  }, async () => firstGate);
+  const second = secondTransaction.run({
+    action: 'control.enable',
+    threadId: TEST_THREAD,
+    desktopThreadId: TEST_THREAD,
+    intent: createExplicitUiIntent({ id: 'intent-toctou-process-second', action: 'control.enable', threadId: TEST_THREAD }),
+  }, async () => { secondRan = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  releaseFirst();
+  await first;
+  await assert.rejects(second, error => error.code === 'PROTECTED_THREAD');
+  assert.equal(secondRan, false);
+});
+
+test('process control restores only the replacement process returned by the restart operation', async () => {
+  const adapter = createRestartingAdapter();
+  const listWindows = adapter.listTopLevelWindows.bind(adapter);
+  let unrelatedVisible = false;
+  adapter.listTopLevelWindows = () => [
+    ...(unrelatedVisible ? [{
+      handle: 'codex-unrelated',
+      processId: 999,
+      processName: 'ChatGPT.exe',
+      title: 'Codex unrelated',
+      visible: true,
+      ownerHandle: null,
+    }] : []),
+    ...listWindows(),
+  ];
+  const transaction = new ExplicitProcessControlTransaction({
+    adapter,
+    guard: createProtectedThreadGuard(),
+  });
+  await transaction.run({
+    action: 'control.enable',
+    threadId: 'desktop-control',
+    intent: createExplicitUiIntent({ id: 'intent-process-bound-pid', action: 'control.enable', threadId: 'desktop-control' }),
+  }, async () => {
+    adapter.restartCodex('codex-new', 501);
+    unrelatedVisible = true;
+    return attachProcessControlReplacement({ ready: true }, { processId: 501 });
+  });
+
+  assert.equal(adapter.events.some(event => (
+    event.type === 'setWindowPlacement' && event.handle === 'codex-new'
+  )), true);
+  assert.equal(adapter.events.some(event => (
+    event.type === 'setWindowPlacement' && event.handle === 'codex-unrelated'
+  )), false);
+});
+
+test('a process restart that settles during timeout grace still restores its bound replacement', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 4,
+    normalPosition: { left: 70, top: 50, right: 1270, bottom: 850 },
+  };
+  const adapter = createRestartingAdapter({ placement: originalPlacement });
+  const transaction = new ExplicitProcessControlTransaction({
+    adapter,
+    guard: createProtectedThreadGuard(),
+    timeoutMs: 10,
+    timeoutGraceMs: 60,
+    circuitBreaker: new UiActionCircuitBreaker(),
+  });
+
+  await assert.rejects(transaction.run({
+    action: 'control.enable',
+    threadId: 'desktop-control',
+    intent: createExplicitUiIntent({ id: 'intent-process-timeout-bound', action: 'control.enable', threadId: 'desktop-control' }),
+  }, async () => {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    adapter.restartCodex('codex-new', 501);
+    return attachProcessControlReplacement({ ready: true }, { processId: 501 });
+  }), error => error.code === 'UI_ACTION_TIMEOUT');
+  assert.deepEqual(adapter.placementOf('codex-new'), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});

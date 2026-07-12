@@ -21,14 +21,18 @@ function bodyOf(functionName) {
   assert.match(body, /availableModelOptionsForSwitch\(\)/, 'implicit model switch targets also use live client model options');
 }
 
-assert.match(
-  serverSource,
-  /async function warmCodexModeOptionsAfterStart\(\)[\s\S]*readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/,
-  'backend startup warms the live Codex mode options cache from the client menu with a bounded timeout'
-);
-
-assert.match(
+assert.doesNotMatch(
   serverSource,
   /server\.listen\([\s\S]*warmCodexModeOptionsAfterStart\(\)/,
-  'backend startup schedules one client-menu model option refresh after listening'
+  'backend startup never activates Codex to warm client-menu options'
 );
+
+{
+  const body = bodyOf('handleClientConfig');
+  assert.doesNotMatch(
+    body,
+    /readLiveCodexModeOptionsBounded/,
+    'background config reads never turn a refresh query into desktop UI automation'
+  );
+  assert.match(body, /cachedLiveModeOptions\(\)/, 'config can use the last passive cache without focusing Codex');
+}
