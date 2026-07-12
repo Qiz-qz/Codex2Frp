@@ -132,9 +132,20 @@ test('PowerShell runner uses encoded no-shell execution and contains the require
     'IsIconic',
     'ShowWindowAsync',
     'SetForegroundWindow',
+    'GetCurrentThreadId',
+    'GetWindowThreadProcessId',
+    'AttachThreadInput',
+    'BringWindowToTop',
+    'SetActiveWindow',
   ]) {
     assert.match(script, new RegExp(api));
   }
+  assert.match(script, /finally\s*\{[\s\S]*AttachThreadInput\([^;]+false\)/,
+    'temporary input attachment is always detached');
+  assert.match(script, /GetForegroundWindow\(\)\s*==\s*handle/,
+    'activation reports success only when the target is actually foreground');
+  assert.doesNotMatch(script, /SendKeys|keybd_event|SetWindowPos/,
+    'activation uses neither keyboard simulation nor permanent topmost flags');
 });
 
 test('PowerShell runner fails closed off Windows without invoking a process', () => {

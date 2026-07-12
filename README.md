@@ -48,7 +48,7 @@ release/v1.3.0/SHA256SUMS.txt
 The current SHA-256 is:
 
 ```text
-8c4aee6de254a92f254152e3933036deced9759a616733b2f2f1afe76a17e9a0  Codex2FrpSetup-v1.3.0.exe
+bd48da5f1d47b4dd471acdc811734bc7dc690fb74cadcc00ba5d9ba4bdacda7a  Codex2FrpSetup-v1.3.0.exe
 ```
 
 The installer can be run graphically, or silently:

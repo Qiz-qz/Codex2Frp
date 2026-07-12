@@ -40,11 +40,35 @@ test('only authenticated explicit mobile routes enter the focus transaction', ()
   assert.match(body, /isAuthorized\(req\)/);
   assert.match(body, /createExplicitUiIntent/);
   assert.match(body, /uiActionTransaction\.run/);
-  assert.match(body, /readCurrentCodexThreadSelection/);
+  assert.doesNotMatch(body, /readCurrentCodexThreadSelection/,
+    'HTTP wrapper does not inspect the active desktop task before the transaction activates Codex');
+  assert.match(functionBody('resolveExplicitUiObservedThread'), /readCurrentCodexThreadSelection/);
   assert.match(body, /BufferedHttpResponse/);
   assert.ok(body.indexOf('isAuthorized(req)') < body.indexOf('readBody(req)'), 'authorization precedes body parsing');
   assert.match(contextBody, /requireObservedTargetMatch:\s*!requestedThreadId/,
     'implicit-current actions reject a desktop task change while waiting for the UI lock');
+});
+
+test('ordinary explicit UI transaction activates before resolving and guarding the observed task', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'control', 'ui-action-transaction.js'), 'utf8');
+  const body = source.slice(source.indexOf('class UiActionTransaction'), source.indexOf('class ExplicitProcessControlTransaction'));
+  assert.ok(body.indexOf('session.activate()') >= 0);
+  assert.ok(body.indexOf('readyGuardContext(context, this.resolveObservedThread') > body.indexOf('session.activate()'));
+  assert.ok(body.indexOf('this.guard.assertAllowed(currentGuardContext)') > body.indexOf('readyGuardContext(context, this.resolveObservedThread'));
+});
+
+test('only the composer plus-menu GET is classified as a read-only UI transaction', () => {
+  const contextBody = functionBody('uiRouteMutationContext');
+  const transactionSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'control', 'ui-action-transaction.js'), 'utf8');
+  const transactionBody = transactionSource.slice(
+    transactionSource.indexOf('class UiActionTransaction'),
+    transactionSource.indexOf('class ExplicitProcessControlTransaction'),
+  );
+  assert.match(contextBody, /pathname === '\/codex\/composer-plus-menu'[\s\S]*access\s*=\s*'readOnly'/);
+  assert.match(contextBody, /\r?\n\s*access,\r?\n/);
+  assert.match(transactionBody, /context\.access === 'readOnly'/);
+  assert.match(transactionBody, /if \(!readOnly\)[\s\S]*readyGuardContext/);
+  assert.doesNotMatch(contextBody, /composer-action[^}]+access\s*=\s*'readOnly'/s);
 });
 
 test('dispatch marks every legacy UI mutation as explicit and leaves reads/background v3 outside', () => {

@@ -8090,6 +8090,7 @@ function uiRouteMutationContext(req, payload = {}, desktopThreadId = '') {
     ? payload.threadId.trim()
     : url.searchParams.get('threadId') || '';
   let action = '';
+  let access = 'mutating';
 
   if (pathname === '/send') {
     if (payload.target !== 'codex') {
@@ -8113,6 +8114,7 @@ function uiRouteMutationContext(req, payload = {}, desktopThreadId = '') {
     })[threadAction] || '';
   } else if (pathname === '/codex/composer-plus-menu') {
     action = 'composer.plus';
+    access = 'readOnly';
   } else if (pathname === '/codex/composer-action') {
     const composerAction = String(payload.action || '').trim().toLowerCase();
     action = composerAction === 'compact'
@@ -8135,16 +8137,12 @@ function uiRouteMutationContext(req, payload = {}, desktopThreadId = '') {
   }
 
   if (!action) return null;
-  const threadId = requestedThreadId || desktopThreadId;
-  if (!threadId) {
-    const error = new Error('Cannot safely determine the Codex task for this UI action.');
-    error.code = 'UI_ACTIVE_THREAD_UNKNOWN';
-    error.statusCode = 409;
-    throw error;
-  }
+  const threadId = requestedThreadId || desktopThreadId || 'desktop-current';
   return {
     action,
+    access,
     threadId,
+    resolveTargetFromObserved: !requestedThreadId && !desktopThreadId,
     requireObservedTargetMatch: !requestedThreadId && action !== 'control.enable',
   };
 }
@@ -8161,15 +8159,7 @@ async function runExplicitUiHttpAction(req, res, handler) {
     }
   }
 
-  const selection = await readCurrentCodexThreadSelection({ force: true });
-  const desktopThreadId = selection && selection.threadId || '';
-  if (!desktopThreadId && threadProtectionRegistry.summary().protectedCount > 0) {
-    const error = new Error('The active desktop task could not be verified safely.');
-    error.code = 'UI_ACTIVE_THREAD_UNKNOWN';
-    error.statusCode = 409;
-    throw error;
-  }
-  const context = uiRouteMutationContext(req, payload, desktopThreadId);
+  const context = uiRouteMutationContext(req, payload);
   if (!context) return handler(req, res);
 
   const intent = createExplicitUiIntent({
@@ -8180,8 +8170,6 @@ async function runExplicitUiHttpAction(req, res, handler) {
   const buffered = new BufferedHttpResponse();
   await uiActionTransaction.run({
     ...context,
-    desktopThreadId,
-    observedThreadId: desktopThreadId,
     intent,
     background: false,
   }, async ({ window, signal, fence }) => explicitUiActionStorage.run(

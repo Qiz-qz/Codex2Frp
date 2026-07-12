@@ -89,6 +89,10 @@ function createTransaction(adapter, options = {}) {
     timeoutGraceMs: options.timeoutGraceMs,
     circuitBreaker: options.circuitBreaker,
     resolveObservedThread: options.resolveObservedThread,
+    observedThreadReadyTimeoutMs: options.observedThreadReadyTimeoutMs,
+    observedThreadPollIntervalMs: options.observedThreadPollIntervalMs,
+    now: options.now,
+    sleep: options.sleep,
   });
 }
 
@@ -574,6 +578,133 @@ test('ordinary UI guard re-resolves the observed desktop task inside the global 
   await first;
   await assert.rejects(second, error => error.code === 'PROTECTED_THREAD');
   assert.equal(secondRan, false);
+});
+
+test('minimized explicit UI action activates before resolving the observed task and restores afterwards', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 9,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 } };
+  const adapter = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  let resolverForeground = '';
+  const transaction = createTransaction(adapter, { resolveObservedThread: async () => {
+    resolverForeground = adapter.currentForeground();
+    return TEST_THREAD;
+  } });
+  let operationRan = false;
+  await transaction.run(context(createExplicitUiIntent({ id:'intent-minimized-order', action:'composer.plus', threadId:TEST_THREAD })), async () => {
+    operationRan = true;
+  });
+  assert.equal(resolverForeground, 'codex-window');
+  assert.equal(operationRan, true);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('read-only explicit UI action skips task identity guard and restores minimized state and focus', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 11,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 } };
+  const adapter = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  let resolverCalls = 0;
+  const transaction = createTransaction(adapter, {
+    guard: createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] }),
+    resolveObservedThread: async () => {
+      resolverCalls += 1;
+      throw Object.assign(new Error('unknown'), { code: 'UI_ACTIVE_THREAD_UNKNOWN' });
+    },
+  });
+  let operationRan = false;
+  await transaction.run(context(createExplicitUiIntent({
+    id: 'intent-read-only-menu', action: 'composer.plus', threadId: TEST_THREAD,
+  }), { access: 'readOnly' }), async () => {
+    operationRan = true;
+  });
+  assert.equal(operationRan, true);
+  assert.equal(resolverCalls, 0);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('unknown observed task after activation fails closed and still restores minimized state and focus', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 3,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 } };
+  const adapter = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  const unknown = Object.assign(new Error('unknown'), { code:'UI_ACTIVE_THREAD_UNKNOWN' });
+  let now = 0;
+  const transaction = createTransaction(adapter, {
+    resolveObservedThread: async () => { throw unknown; },
+    observedThreadReadyTimeoutMs: 20,
+    observedThreadPollIntervalMs: 10,
+    now: () => now,
+    sleep: async ms => { now += ms; },
+  });
+  let operationRan = false;
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({ id:'intent-minimized-unknown', action:'composer.plus', threadId:TEST_THREAD })), async () => {
+    operationRan = true;
+  }), error => error.code === 'UI_ACTIVE_THREAD_UNKNOWN');
+  assert.equal(operationRan, false);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('protected observed task is checked after activation and still restores minimized state and focus', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 5,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 } };
+  const adapter = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  let observedForeground = '';
+  const transaction = createTransaction(adapter, {
+    guard: createProtectedThreadGuard({ protectedThreadIds:[PROTECTED_THREAD] }),
+    resolveObservedThread: async () => { observedForeground = adapter.currentForeground(); return PROTECTED_THREAD; }
+  });
+  let operationRan = false;
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({ id:'intent-minimized-protected', action:'composer.plus', threadId:TEST_THREAD })), async () => {
+    operationRan = true;
+  }), error => error.code === 'PROTECTED_THREAD');
+  assert.equal(observedForeground, 'codex-window');
+  assert.equal(operationRan, false);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+});
+
+test('explicit UI waits with bounded readiness polling for active task after activation', async () => {
+  const adapter = createWin32Adapter({ foreground:'editor-window' });
+  const observations = ['', '', TEST_THREAD];
+  let now = 0;
+  const sleeps = [];
+  const transaction = createTransaction(adapter, {
+    resolveObservedThread: async () => observations.shift() ?? TEST_THREAD,
+    observedThreadReadyTimeoutMs: 200,
+    observedThreadPollIntervalMs: 25,
+    now: () => now,
+    sleep: async ms => { sleeps.push(ms); now += ms; },
+  });
+  let operationRan = false;
+  await transaction.run(context(createExplicitUiIntent({ id:'intent-readiness-success', action:'composer.plus', threadId:TEST_THREAD })), async () => {
+    operationRan = true;
+  });
+  assert.equal(operationRan, true);
+  assert.deepEqual(sleeps, [25, 25]);
+  assert.equal(adapter.currentForeground(), 'editor-window');
+  assert.equal(sleeps.reduce((sum, value) => sum + value, 0) <= 200, true);
+});
+
+test('active task readiness timeout fails closed without a long sleep and restores state', async () => {
+  const originalPlacement = { showState:WINDOW_SHOW_STATES.MINIMIZED, flags:4,
+    normalPosition:{ left:100, top:60, right:1300, bottom:860 } };
+  const adapter = createWin32Adapter({ foreground:'editor-window', placement:originalPlacement });
+  let now = 0;
+  const sleeps = [];
+  const transaction = createTransaction(adapter, {
+    resolveObservedThread: async () => { throw Object.assign(new Error('not ready'), { code:'UI_ACTIVE_THREAD_UNKNOWN' }); },
+    observedThreadReadyTimeoutMs: 90,
+    observedThreadPollIntervalMs: 30,
+    now: () => now,
+    sleep: async ms => { sleeps.push(ms); now += ms; },
+  });
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({ id:'intent-readiness-timeout', action:'composer.plus', threadId:TEST_THREAD })), async () => {}),
+    error => error.code === 'UI_ACTIVE_THREAD_UNKNOWN');
+  assert.deepEqual(sleeps, [30,30,30]);
+  assert.equal(Math.max(...sleeps) <= 30, true);
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.currentForeground(), 'editor-window');
 });
 
 test('explicit process control rebinds restoration to a restarted Codex HWND without activating the old HWND', async () => {
