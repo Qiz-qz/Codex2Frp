@@ -81,13 +81,16 @@ test('composer actions cover compact, goal, plan, and exact plus menu item entry
   assert.doesNotMatch(actionBody, /activateCodexThread\(/, 'composer actions must not deep-link threads before CDP menu actions');
   assert.doesNotMatch(actionBody, /case 'goal'[\s\S]{0,180}clickCodexComposerBottomButtonViaCdp/, 'goal is not searched as a loose bottom-screen button');
   assert.doesNotMatch(actionBody, /case 'plan'[\s\S]{0,180}clickCodexComposerBottomButtonViaCdp/, 'plan is not searched as a loose bottom-screen button');
-  assert.match(actionBody, /case 'plus-menu-item'[\s\S]{0,260}selectCodexPlusMenuItemViaCdp\(\[target\]\)/, 'exact plus menu item actions select the matching desktop plus row');
+  assert.match(actionBody, /case 'plus-menu-item'[\s\S]{0,320}selectCodexPlusMenuItemViaCdp\(\[target\],\s*classifiedSelection\)/, 'exact plus menu item actions select the matching typed desktop plus row');
   assert.doesNotMatch(actionBody, /case 'plus-menu-item'[\s\S]{0,260}clickCodexSidebarButtonViaCdp/, 'plugin tool rows are not opened through the left sidebar plugin entry');
   assert.doesNotMatch(actionBody, /pasteAndEnter|sendTextViaCodexCdp/, 'composer actions do not submit ordinary task text');
 
   const cdpThreadBody = functionBody('activateCodexThreadViaExistingCdp');
   assert.match(cdpThreadBody, /findCodexCdpTarget\(\{\s*autoOpen:\s*false\s*\}\)/, 'thread activation for composer actions requires the existing controlled Codex window');
   assert.match(cdpThreadBody, /data-app-action-sidebar-thread-id/, 'thread activation clicks Codex sidebar thread rows by id');
+  assert.match(cdpThreadBody, /verifiedSelectionExpression\(\)/, 'thread activation re-reads exact desktop identity after navigation');
+  assert.match(cdpThreadBody, /normalizeCurrentThreadSelection/, 'thread activation normalizes verified route/action UUID evidence');
+  assert.match(cdpThreadBody, /CODEX_THREAD_SELECTION_UNCONFIRMED/, 'an unconfirmed requested UUID has a stable fail-closed code');
   assert.doesNotMatch(cdpThreadBody, /openWindowsUri|codexThreadDeepLink/, 'composer thread activation does not use protocol links that can open another client');
 });
 
@@ -156,7 +159,7 @@ test('desktop composer plus menu can be read as grouped mobile options', () => {
   assert.match(readerBody, /mergeCodexPlusMenuItems\(collected,\s*visibleItems\)/, 'reader keeps rows from earlier and later scroll positions');
   assert.match(functionBody('readCodexModeMenuSnapshot'), /lines:\s*linesOf\(el\)/, 'CDP snapshots preserve menu row line breaks for dynamic plugin titles');
   assert.doesNotMatch(functionBody('codexPlusMenuItemsFromSnapshot'), /findKnownCodexPlusMenuRow\(item\.text\)/, 'plus menu reader does not drop newly installed plugin rows just because they are not hard-coded');
-  assert.match(normalizeBody, /rawLines\[0\][\s\S]*section:\s*'插件'/, 'unknown plus-menu rows are still exposed as plugin options with their real title');
+  assert.match(normalizeBody, /rawLines\[0\][\s\S]*classification\.kind[\s\S]*!classification\.executable/, 'unknown plus-menu rows retain their real title but remain disabled instead of becoming plugins');
   assert.match(knownRowsBody, /Files and folders/, 'normalizer recognizes the desktop file/folder add row');
   assert.match(knownRowsBody, /Documents/, 'normalizer recognizes document plugin rows');
   assert.match(knownRowsBody, /Superpowers/, 'normalizer recognizes installed plugin rows');
@@ -223,18 +226,62 @@ test('plus menu insertion is verified and can be removed from the Codex composer
   assert.match(plusClickBody, /catch \(error\)[\s\S]*clickCodexPlusButtonDomFallback\(client,\s*rect\)/, 'plus-menu opening falls back only after the guarded mouse click path stalls');
   assert.match(functionBody('assertSafeCdpClickTarget'), /isCodexStopControlText\(text\)/, 'low-level CDP click guard refuses stop and interruption controls even if selectors are wrong');
   assert.match(functionBody('clickCodexPlusMenuItemWithFallback'), /readCodexComposerReferenceStateInCdpClient\(client,\s*labels\)/, 'plus-menu item fallback is only used after checking whether the reference was inserted');
-  assert.match(selectBody, /clickCodexPlusMenuItemWithFallback\(client,\s*item,\s*targetLabels\)/, 'plus-menu selection uses the verified click helper instead of a bare mouse click');
+  assert.match(selectBody, /clickCodexPlusMenuItemWithFallback\(client,\s*item,\s*targetLabels,\s*actual\)/, 'plus-menu selection uses the typed verified click helper instead of a bare mouse click');
   assert.match(selectBody, /verifyCodexComposerReferenceInserted\(client,\s*targetLabels/, 'plus-menu action verifies the selected item becomes a composer reference');
   assert.match(serverSource, /CODEX_COMPOSER_REFERENCE_NOT_INSERTED/, 'unverified plus-menu clicks have a stable failure code');
 
   const actionBody = functionBody('runCodexComposerAction');
-  assert.match(serverSource, /async function focusCurrentCodexComposerForComposerAction/, 'composer actions can fall back to the current controlled Codex window when the selected sidebar row is not visible');
-  assert.match(functionBody('activateCodexThreadForComposerAction'), /focusCurrentCodexComposerForComposerAction\(threadId,\s*result\)/, 'missing sidebar rows no longer block plugin insertion in the current Codex window');
+  const activationBody = functionBody('activateCodexThreadForComposerAction');
+  assert.match(serverSource, /async function focusCurrentCodexComposerForComposerAction/, 'an explicit current-composer path remains available when no task UUID was requested');
+  assert.match(activationBody, /if \(!threadId\)[\s\S]*focusCurrentCodexComposerForComposerAction\('',/, 'only an explicit no-thread request may target the current composer');
+  assert.doesNotMatch(activationBody, /focusCurrentCodexComposerForComposerAction\(threadId,\s*result\)/, 'failed activation of a requested UUID never falls back to the current desktop composer');
+  assert.match(activationBody, /CODEX_THREAD_EXACT_ACTIVATION_REQUIRED/, 'failed exact activation returns a stable conflict code');
   assert.match(actionBody, /case 'remove-plus-menu-item'/, 'composer actions expose a remove operation for mobile chip deletion');
   assert.match(actionBody, /removeCodexPlusMenuItemViaCdp\(\[target\],\s*selectionHint\)/, 'remove action forwards selection metadata so plugins and Add references use their correct cancellation behavior');
   assert.match(functionBody('handleComposerAction'), /payload\.selection[\s\S]*runCodexComposerAction\(threadId,\s*action,\s*target,\s*selection\)/, 'composer action endpoint accepts selection metadata from mobile');
   assert.match(actionBody, /selection:\s*result\.selection/, 'insert action returns the verified composer reference to the mobile client');
   assert.doesNotMatch(actionBody, /case 'plus-menu-item'[\s\S]{0,360}message:\s*`\$\{target\} opened in Codex\.`/, 'insert action does not claim success merely because a menu row was clicked');
+});
+
+test('thread-scoped model, reasoning, and speed mutations exact-confirm the requested composer first', () => {
+  for (const name of ['switchCodexGuiModel', 'switchCodexReasoningMode', 'switchCodexSpeedMode']) {
+    const body = functionBody(name);
+    assert.match(body, /if \(threadId\)\s*\{\s*await activateCodexThreadForComposerAction\(threadId\);\s*\}/,
+      `${name} confirms the requested task before any live or config mutation`);
+    assert.ok(
+      body.indexOf('activateCodexThreadForComposerAction(threadId)') < body.indexOf('trySyncCodex'),
+      `${name} cannot touch the current composer before exact task activation`,
+    );
+    assert.match(body, /assertExactComposerThreadBeforeSideEffect\(threadId,/,
+      `${name} rechecks exact task identity immediately before config fallback mutation`);
+    assert.ok(
+      body.indexOf('activateCodexThreadForComposerAction(threadId)') < body.indexOf('assertExactComposerThreadBeforeSideEffect(threadId,'),
+      `${name} performs the side-effect fence after exact activation`,
+    );
+  }
+  const modeMenuBody = functionBody('selectCodexComposerModeMenuItemViaCdp');
+  assert.match(modeMenuBody, /assertExactThreadBeforeSideEffect[\s\S]*cdpClickRect\(client,\s*targetItem\.rect\)/,
+    'model/reasoning/speed menu selection rechecks exact task identity in the same CDP client immediately before click');
+  for (const name of ['trySyncCodexModelViaExistingCdp', 'trySyncCodexReasoningViaExistingCdp', 'trySyncCodexSpeedViaExistingCdp']) {
+    assert.match(functionBody(name), /selectCodex(?:Model|ReasoningMode|SpeedMode)ViaCdp\(target,\s*threadId\)/,
+      `${name} forwards the requested task into the final menu-click fence`);
+  }
+});
+
+test('composer menu actions fail closed by typed kind and keep subagents out of plugin paths', () => {
+  assert.match(serverSource, /classifyMenuItem/, 'server uses the shared stable-attribute classifier');
+  assert.match(functionBody('normalizeCodexPlusMenuItem'), /kind:\s*classification\.kind/, 'live rows publish an explicit typed kind');
+  assert.match(functionBody('runCodexComposerAction'), /CODEX_COMPOSER_ITEM_UNKNOWN/, 'unknown rows are rejected as non-executable');
+  assert.match(functionBody('runCodexComposerAction'), /CODEX_COMPOSER_KIND_MISMATCH/, 'plugin actions require a real plugin classification');
+  assert.match(functionBody('selectCodexPlusMenuItemViaCdp'), /kind === 'subagent'/, 'subagent selection has a dedicated non-reference path');
+  assert.doesNotMatch(functionBody('isPluginComposerSelection'), /section === '插件'|row && row\.section/, 'plugin removal never infers plugin identity from legacy section text');
+});
+
+test('generic Add rows stay disabled while audited Chinese plugin rows stay executable', () => {
+  const classifier = require('../lib/control/composer-menu-classifier');
+  assert.equal(classifier.classifyMenuItem({ group: 'Add', label: 'Future row' }).kind, 'unknown');
+  assert.equal(classifier.isExecutableMenuItem({ group: 'Add', label: 'Future row' }), false);
+  assert.deepEqual(classifier.classifyMenuItem({ group: '插件', label: 'Documents' }), { kind: 'plugin', executable: true });
 });
 
 test('mobile pairing token is persisted across backend restarts', () => {
@@ -270,7 +317,7 @@ test('model switching verifies the live CDP client before reporting success', ()
   assert.doesNotMatch(helperBody, /Input\.insertText|clickCodexSendButtonInCdpClient|sendTextViaCodexCdp/, 'model menu helper must not type or send messages');
 
   const switchBody = functionBody('switchCodexGuiModel');
-  assert.match(switchBody, /trySyncCodexModelViaExistingCdp\(target\)/, 'model switch syncs the visible Codex client when control is already enabled');
+  assert.match(switchBody, /trySyncCodexModelViaExistingCdp\(target,\s*threadId\)/, 'model switch syncs the visible Codex client when control is already enabled');
   assert.match(switchBody, /trySwitchCodexModelViaConfig\(liveTargetModel \|\| target\)/, 'model switch persists config only after live verification');
   assert.doesNotMatch(switchBody, /focusTarget\('codex'/, 'model switch must not focus or open a new Codex client as a side effect');
   assert.doesNotMatch(switchBody, /sendTextViaCodexCdp\('\/模型'\)/, 'model switch must not send slash commands as tasks');
@@ -279,7 +326,7 @@ test('model switching verifies the live CDP client before reporting success', ()
   assert.match(functionBody('trySwitchCodexModelViaConfig'), /writeCodexConfigStringValue\('model'/, 'config model switch persists the Codex model setting');
   assert.doesNotMatch(functionBody('trySwitchCodexModelViaConfig'), /verifyCodexModelSwitch\(/, 'config model switch does not fail just because CDP/live session verification is unavailable');
   assert.match(functionBody('trySyncCodexModelViaExistingCdp'), /requireExistingCodexCdpTargetForSwitch\('model'\)/, 'live model sync requires an existing CDP client without auto-opening one');
-  assert.match(functionBody('trySyncCodexModelViaExistingCdp'), /selectCodexModelViaCdp\(target\)/, 'live model sync selects the target from the real Codex menu');
+  assert.match(functionBody('trySyncCodexModelViaExistingCdp'), /selectCodexModelViaCdp\(target,\s*threadId\)/, 'live model sync selects the target from the real Codex menu');
   assert.match(functionBody('trySyncCodexModelViaExistingCdp'), /verifyCodexModelSwitch\('',\s*target,[\s\S]*domOnly:\s*true/, 'live model sync verifies the visible Codex DOM instead of stale session files');
   assert.match(functionBody('trySwitchCodexModelViaConfig'), /verifiedBy:\s*'config-write'/, 'config model switch reports a config-write confirmation');
   assert.match(switchBody, /writeControlOverride\('model'/, 'model switch records a status override immediately after persisting config');
@@ -296,13 +343,13 @@ test('reasoning switch verifies the live CDP client before reporting success', (
   assert.doesNotMatch(helperBody, /Input\.insertText|clickCodexSendButtonInCdpClient|sendTextViaCodexCdp/, 'reasoning menu helper must not type or send messages');
 
   const switchBody = functionBody('switchCodexReasoningMode');
-  assert.match(switchBody, /trySyncCodexReasoningViaExistingCdp\(target\)/, 'reasoning switch syncs the visible Codex client when control is already enabled');
+  assert.match(switchBody, /trySyncCodexReasoningViaExistingCdp\(target,\s*threadId\)/, 'reasoning switch syncs the visible Codex client when control is already enabled');
   assert.match(switchBody, /trySwitchCodexReasoningViaConfig\(liveTargetReasoning \|\| target\)/, 'reasoning switch persists config only after live verification');
   assert.doesNotMatch(switchBody, /focusTarget\('codex'/, 'reasoning switch must not focus or open a new Codex client as a side effect');
   assert.match(functionBody('trySwitchCodexReasoningViaConfig'), /writeCodexConfigStringValue\('model_reasoning_effort'/, 'config reasoning switch persists the Codex reasoning setting');
   assert.doesNotMatch(functionBody('trySwitchCodexReasoningViaConfig'), /verifyCodexReasoningModeSwitch\(/, 'config reasoning switch does not require CDP/live verification');
   assert.match(functionBody('trySyncCodexReasoningViaExistingCdp'), /requireExistingCodexCdpTargetForSwitch\('reasoning'\)/, 'live reasoning sync requires an existing CDP client without auto-opening one');
-  assert.match(functionBody('trySyncCodexReasoningViaExistingCdp'), /selectCodexReasoningModeViaCdp\(target\)/, 'live reasoning sync selects the target from the real Codex menu');
+  assert.match(functionBody('trySyncCodexReasoningViaExistingCdp'), /selectCodexReasoningModeViaCdp\(target,\s*threadId\)/, 'live reasoning sync selects the target from the real Codex menu');
   assert.match(functionBody('trySyncCodexReasoningViaExistingCdp'), /verifyCodexReasoningModeSwitch\('',\s*target/, 'live reasoning sync verifies the visible Codex DOM');
   assert.match(functionBody('trySwitchCodexReasoningViaConfig'), /verifiedBy:\s*'config-write'/, 'config reasoning switch reports a config-write confirmation');
   assert.match(switchBody, /writeControlOverride\('reasoning'/, 'reasoning switch records a status override immediately after persisting config');
@@ -325,14 +372,14 @@ test('speed switch uses the Codex submenu and never submits commands as tasks', 
   assert.doesNotMatch(helperBody, /Input\.insertText|clickCodexSendButtonInCdpClient|sendTextViaCodexCdp/, 'speed menu helper must not type or send messages');
 
   const switchBody = functionBody('switchCodexSpeedMode');
-  assert.match(switchBody, /trySyncCodexSpeedViaExistingCdp\(target\)/, 'speed switch syncs the visible Codex client when control is already enabled');
+  assert.match(switchBody, /trySyncCodexSpeedViaExistingCdp\(target,\s*threadId\)/, 'speed switch syncs the visible Codex client when control is already enabled');
   assert.match(switchBody, /trySwitchCodexSpeedViaConfig\(liveTargetSpeed \|\| target\)/, 'speed switch persists config only after live verification');
   assert.doesNotMatch(switchBody, /focusTarget\('codex'/, 'speed switch must not focus or open a new Codex client as a side effect');
   assert.match(switchBody, /controlOverrideModel\(controlOverrides,\s*parsedModel\) \|\| configModel \|\| liveModel/, 'speed switch respects App/config model before stale live window data');
   assert.match(functionBody('trySwitchCodexSpeedViaConfig'), /writeCodexConfigStringValue\('service_tier'/, 'speed switch can use the real Codex service_tier config');
   assert.match(functionBody('trySwitchCodexSpeedViaConfig'), /verifiedBy\s*=\s*'config-write'/, 'speed config path is reported as a verified config write');
   assert.match(functionBody('trySyncCodexSpeedViaExistingCdp'), /requireExistingCodexCdpTargetForSwitch\('speed'\)/, 'live speed sync requires an existing CDP client without auto-opening one');
-  assert.match(functionBody('trySyncCodexSpeedViaExistingCdp'), /selectCodexSpeedModeViaCdp\(target\)/, 'live speed sync selects the target from the real Codex speed submenu');
+  assert.match(functionBody('trySyncCodexSpeedViaExistingCdp'), /selectCodexSpeedModeViaCdp\(target,\s*threadId\)/, 'live speed sync selects the target from the real Codex speed submenu');
   assert.match(functionBody('trySyncCodexSpeedViaExistingCdp'), /verifiedBy:\s*'menu-selection'/, 'live speed sync confirms the real submenu selection before success');
   assert.match(functionBody('trySyncCodexSpeedViaExistingCdp'), /evidence:\s*selection\?\.selected\?\.text/, 'live speed sync keeps menu-selection evidence for diagnostics');
   assert.match(switchBody, /writeControlOverride\('speed'/, 'speed switch records a status override immediately after persisting config');
@@ -383,20 +430,30 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(serverSource, /readCodexModeOptionsViaCdp/, 'backend discovers model, reasoning, and speed options from the real Codex menu');
   assert.match(functionBody('codexModeMenuItems'), /cmdkItem|radixItem/, 'live option discovery only accepts real menu collection items');
   assert.doesNotMatch(functionBody('codexModeMenuItems'), /item\.rect\.w < 40/, 'live option discovery does not absorb ordinary sidebar buttons by size');
-  assert.match(statusBody, /liveModeState/, 'status can read live Codex window state when available');
+  assert.match(statusBody, /nextTurnSettings/, 'status separates exact next-turn composer state from session history');
+  assert.match(statusBody, /lastTurnSettings/, 'status preserves last-turn settings under an explicitly historical field');
   assert.match(statusBody, /liveModeOptions/, 'status returns live Codex menu options to mobile clients');
   assert.match(statusBody, /modelOptions/, 'status exposes live model choices');
   assert.match(statusBody, /speedOptions/, 'status exposes live speed choices');
   assert.match(serverSource, /resolveLiveSpeedOptions/, 'status/config merge the current speed with live speed menu choices');
   assert.match(functionBody('resolveLiveSpeedOptions'), /Object\.values\(SPEED_MODE_TARGETS\)/, 'speed options fall back to standard and fast without opening Codex menus');
-  assert.match(statusBody, /liveModel,[\s\S]*overrideModel,[\s\S]*configModel/, 'status shows the real visible Codex client state before persisted fallback data');
-  assert.match(statusBody, /configSpeedMode/, 'status falls back to config speed when the active session lacks speed metadata');
-  assert.match(statusBody, /configReasoningMode/, 'status falls back to config reasoning when the active session lacks reasoning metadata');
+  assert.doesNotMatch(statusBody, /overrideModel|configModel|configReasoningMode|configSpeedMode/,
+    'exact current composer settings never fall back to an override, config, or prior turn');
   assert.match(serverSource, /async function readCodexComposerModeStateViaCdp/, 'backend reads the live mode button state as structured data');
-  assert.match(functionBody('readCodexComposerModeStateViaCdp'), /data-model-selected/, 'live mode state reads the selected model attribute');
-  assert.match(functionBody('readCodexComposerModeStateViaCdp'), /data-reasoning-selected/, 'live mode state reads the selected reasoning attribute');
+  const composerStateBody = functionBody('readCodexComposerModeStateViaCdp');
+  assert.match(composerStateBody, /button\[data-codex-intelligence-trigger="true"\]/,
+    'live mode state reads only the real intelligence trigger and ignores menu rows');
+  assert.match(composerStateBody, /_WorkTriggerModelText_/, 'live model state reads the trigger viewport model label');
+  assert.match(composerStateBody, /_WorkTriggerEffortLabel_/, 'live reasoning state reads the trigger viewport effort label');
+  assert.match(composerStateBody, /!node\.closest\('\[aria-hidden="true"\]'\)/,
+    'hidden measurement candidates inside the trigger are excluded');
+  assert.doesNotMatch(composerStateBody, /data-model-selected|data-reasoning-selected/,
+    'menu-row selection attributes cannot masquerade as the closed trigger selection');
+  assert.match(composerStateBody, /data-selected-reasoning-effort/,
+    'live mode state reads the installed trigger reasoning attribute');
   assert.match(functionBody('readCodexComposerModeStateViaCdp'), /data-speed-selected/, 'live mode state reads the selected speed attribute');
-  assert.match(functionBody('readLiveCodexComposerModeState'), /readCodexComposerModeStateViaCdp/, 'status/config use structured live mode data instead of button text alone');
+  assert.match(functionBody('readLiveCodexComposerModeState'), /resolveNextTurnSettings/,
+    'status/config resolve an exact thread-scoped next-turn DTO instead of guessing from trigger text');
   assert.match(serverSource, /handleAttachment/, 'server exposes authenticated image attachments for mobile rendering');
   assert.match(configBody, /controlPort/, 'config explains the Codex control-port capability exposed by the backend');
 });
@@ -534,7 +591,8 @@ test('history responses include completed process cards with stable fold metadat
   assert.match(historyBody, /fileCacheSignature\(fileStat\)/, 'history cache key follows the JSONL file size and mtime');
   assert.match(historyBody, /threadHistoryCache\.has\(cacheKey\)/, 'unchanged long histories are served from cache instead of reparsed');
   assert.match(historyBody, /boundedSet\(threadHistoryCache/, 'parsed history cache is bounded');
-  assert.match(historyBody, /createSessionNormalizer/, 'history builds structured activity only through the privacy normalizer');
+  assert.match(historyBody, /new EventReconciler/, 'history builds structured activity through the same privacy reconciler as realtime');
+  assert.match(historyBody, /historyReconciler\.rehydrate\(historyEntries\)/, 'history and realtime share lifecycle expansion and snapshot replacement');
   assert.match(historyBody, /turns:\s*buildTurnViews/, 'history exposes stable structured turns for the mobile process card');
 });
 
@@ -586,19 +644,17 @@ test('chat-mutating routes invalidate thread cache for realtime mobile state', (
   assert.match(functionBody('handleThreads'), /refresh'\) === '1'[\s\S]*invalidateCodexThreadListCache/, 'explicit thread refresh bypasses the short thread-list cache');
   assert.match(serverSource, /async function readCurrentCodexThreadSelectionViaCdp/, 'backend can read the current desktop thread through existing CDP without launching Codex');
   assert.match(serverSource, /CODEX_CURRENT_THREAD_CACHE_MS/, 'current desktop thread selection is cached briefly');
-  assert.match(serverSource, /function normalizeCodexThreadId/, 'backend normalizes Codex desktop local-prefixed thread ids');
-  assert.match(serverSource, /function findCodexThreadIdByVisibleText/, 'backend can fall back to matching visible chat text when the selected sidebar row is not marked active');
-  assert.match(functionBody('normalizeCurrentThreadSelection'), /normalizeCodexThreadId\(value\.threadId\)/, 'current thread selection strips Codex local: prefixes before matching session files');
-  assert.match(functionBody('normalizeCurrentThreadSelection'), /findCodexThreadIdByVisibleText\(preview\)/, 'current thread selection can resolve the active thread from the main chat content');
-  assert.match(functionBody('readCurrentCodexThreadSelectionViaCdp'), /\^\(\?:local:\)\?\[a-f0-9\]/, 'desktop current-thread reader accepts current Codex local-prefixed sidebar ids');
-  assert.match(functionBody('readCurrentCodexThreadSelectionViaCdp'), /document\.querySelector\('main'\)[\s\S]*preview/, 'desktop current-thread reader captures main chat text when the sidebar has no active marker');
+  assert.match(functionBody('normalizeCurrentThreadSelection'), /normalizeVerifiedDesktopSelection/, 'current selection uses the fail-closed verified UUID normalizer');
+  assert.match(functionBody('readCurrentCodexThreadSelectionEvidenceViaCdp'), /verifiedSelectionExpression\(\)/, 'desktop current-thread reader reuses the verified exact-selection expression');
+  assert.doesNotMatch(serverSource, /findCodexThreadIdByVisibleText|document\.querySelector\('main'\)[\s\S]*preview/, 'desktop selection never guesses identity from visible chat text');
   assert.match(functionBody('activateCodexThreadViaExistingCdp'), /normalizeThreadId\(el\.getAttribute\('data-app-action-sidebar-thread-id'\)\) === threadId/, 'CDP thread activation matches local-prefixed sidebar ids to stored thread ids');
-  assert.match(functionBody('handleThreads'), /readCurrentCodexThreadSelection\(\{ force: forceRefresh \}\)/, 'threads endpoint refreshes current desktop thread selection');
+  assert.match(functionBody('handleThreads'), /consumeDesktopSelectionForSync\(desktopSelectionAdapter\)/, 'production thread sync consumes phone-origin suppression through the selection adapter');
+  assert.match(functionBody('handleThreads'), /desktopSelectionSuppressed:\s*sync\.suppressed[\s\S]*!sync\.suppressed/, 'phone-origin confirmation is not echoed as a desktop user switch');
   assert.match(functionBody('handleThreads'), /selectedThreadId[\s\S]*currentThreadId[\s\S]*currentThread[\s\S]*threads/, 'threads endpoint returns the current desktop thread id to mobile clients');
   assert.match(functionBody('listCodexThreads'), /includeThreadId[\s\S]*threads\.some\(item => item\.id === includeThreadId\)/, 'thread list keeps the current desktop thread even when it falls outside the limit');
   assert.match(functionBody('handleSend'), /invalidateCodexThreadListCache\(\)[\s\S]*watchSince[\s\S]*invalidateCodexThreadListCache\(\)[\s\S]*return json/, 'send invalidates thread cache before and after accepting a message');
   assert.match(functionBody('handleStopCodex'), /invalidateCodexThreadListCache\(\)[\s\S]*stopCodexResponse[\s\S]*invalidateCodexThreadListCache\(\)/, 'stop invalidates runtime cache around the stop command');
-  assert.match(functionBody('handleSelectThread'), /invalidateCodexThreadListCache\(\)[\s\S]*activateCodexThread/, 'select-thread clears thread cache before activating Codex');
+  assert.match(functionBody('handleSelectThread'), /invalidateCodexThreadListCache\(\)[\s\S]*desktopSelectionAdapter\.openDesktopThread/, 'select-thread clears thread cache before verified navigation');
 });
 
 test('mode menu selection follows Codex nested model and speed menus', () => {

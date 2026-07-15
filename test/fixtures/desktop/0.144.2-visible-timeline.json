@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 2,
+  "desktop": {
+    "appVersion": "26.707.9981.0",
+    "cliVersion": "0.144.2"
+  },
+  "capture": {
+    "projectionSource": "exact-disposable-session-jsonl",
+    "projectionMeaning": "sanitized_backend_event_order_not_direct_desktop_presentation",
+    "automation": "not_performed_packaged_chatgpt_ui_automation_prohibited",
+    "limitations": [
+      "exact_separate_window_ui_interaction_not_performed",
+      "session_derived_fields_are_not_called_desktop_visible",
+      "command_and_file_expansion_details_not_observed",
+      "visual_image_evidence_is_sanitized_reference_only"
+    ]
+  },
+  "sessionProjection": {
+    "entries": [
+      { "id": "command-group-a", "sequence": 1, "kind": "command", "count": 3, "state": "succeeded", "provenance": "session-event-order", "desktopVisibility": "not-asserted" },
+      { "id": "reasoning-boundary", "sequence": 2, "kind": "reasoningSummary", "state": "succeeded", "title": "Reasoning summary boundary", "provenance": "session-event-order", "desktopVisibility": "not-asserted" },
+      { "id": "plan-boundary", "sequence": 3, "kind": "plan", "state": "succeeded", "title": "Plan boundary", "provenance": "session-event-order", "desktopVisibility": "not-asserted" },
+      { "id": "commentary-boundary", "sequence": 4, "kind": "commentary", "state": "succeeded", "title": "Commentary boundary", "provenance": "session-event-order", "desktopVisibility": "not-asserted" },
+      { "id": "command-group-b", "sequence": 5, "kind": "command", "count": 2, "state": "succeeded", "provenance": "session-event-order", "desktopVisibility": "not-asserted" },
+      { "id": "file-group", "sequence": 6, "kind": "file", "count": 2, "state": "succeeded", "provenance": "session-event-order", "desktopVisibility": "not-asserted", "expansionObserved": false },
+      { "id": "subagent-lifecycle", "sequence": 7, "kind": "subagent", "state": "succeeded", "subagent": { "name": "fixture-helper", "state": "running" }, "provenance": "session-lifecycle-name-state-only", "desktopVisibility": "not-asserted" }
+    ],
+    "expectedSegments": [
+      ["command", 3],
+      ["reasoningSummary", 1],
+      ["plan", 1],
+      ["commentary", 1],
+      ["operation", 4],
+      ["subagent", 1]
+    ],
+    "finalObservedByReadApi": true
+  },
+  "visualPresentation": {
+    "sources": [
+      {
+        "id": "running-timeline-screenshot",
+        "evidence": "sanitized-reference",
+        "directlyObservedCaptions": ["运行了 3 个命令", "已查看 4 张图像"],
+        "showsPublicCommentary": true,
+        "showsReasoningSummary": true
+      },
+      {
+        "id": "single-image-screenshot",
+        "evidence": "sanitized-reference",
+        "directlyObservedCaptions": ["已查看 1 张图像"]
+      }
+    ],
+    "groups": [
+      { "id": "visual-command-3", "kind": "command", "count": 3, "state": "succeeded", "title": "运行了 3 个命令", "provenance": "sanitized-reference", "expansionObserved": false },
+      { "id": "visual-image-4", "kind": "image", "variant": "imageView", "count": 4, "state": "succeeded", "title": "已查看 4 张图像", "provenance": "sanitized-reference", "expansionObserved": false },
+      { "id": "visual-image-1", "kind": "image", "variant": "imageView", "count": 1, "state": "succeeded", "title": "已查看 1 张图像", "provenance": "sanitized-reference", "expansionObserved": false }
+    ]
+  }
+}

@@ -5,11 +5,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Win32FocusAdapter } = require('../lib/windows/win32-focus-adapter');
 const { discoverCodexWindow } = require('../lib/windows/codex-window-discovery');
+const { createCodexCdpSelectionObserver } = require('../lib/windows/cdp-selection-observer');
 
 const SCHEMA_VERSION = 1;
 const DEFAULT_DURATION_MS = 60 * 60 * 1000;
 const DEFAULT_INTERVAL_MS = 1000;
 const SHOW_STATES = new Set(['normal', 'minimized', 'maximized', 'hidden', 'unknown']);
+const THREAD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 class FocusSentinelError extends Error {
   constructor(code, message) {
@@ -31,6 +33,7 @@ function parseArgs(argv = []) {
   let intervalMs = DEFAULT_INTERVAL_MS;
   let outputFile = '';
   let requireMinimized = false;
+  let protectedThreadId = '';
   let help = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -43,13 +46,18 @@ function parseArgs(argv = []) {
       requireMinimized = true;
       continue;
     }
-    if (!['--duration', '--interval', '--output'].includes(argument)) throw argumentError();
+    if (!['--duration', '--interval', '--output', '--protected-thread'].includes(argument)) throw argumentError();
     const value = argv[index + 1];
     if (value === undefined || String(value).startsWith('--')) throw argumentError();
     index += 1;
     if (argument === '--output') {
       outputFile = String(value).trim();
       if (!outputFile) throw argumentError();
+      continue;
+    }
+    if (argument === '--protected-thread') {
+      protectedThreadId = String(value).trim().toLowerCase();
+      if (!THREAD_ID_PATTERN.test(protectedThreadId)) throw argumentError();
       continue;
     }
     const number = Number(value);
@@ -60,7 +68,7 @@ function parseArgs(argv = []) {
   }
 
   if (!help && !outputFile) throw argumentError();
-  return { durationMs, intervalMs, outputFile, requireMinimized, help };
+  return { durationMs, intervalMs, outputFile, requireMinimized, protectedThreadId, help };
 }
 
 function safeInteger(value) {
@@ -106,6 +114,7 @@ function normalizePlacement(value) {
 
 function captureState(adapter, discover = discoverCodexWindow) {
   if (!adapter || typeof adapter.getForegroundWindow !== 'function'
+    || typeof adapter.getFocusedWindow !== 'function'
     || typeof adapter.getWindowPlacement !== 'function') {
     throw new FocusSentinelError(
       'FOCUS_SENTINEL_ADAPTER_INVALID',
@@ -113,10 +122,12 @@ function captureState(adapter, discover = discoverCodexWindow) {
     );
   }
   const foregroundWindow = safeHandle(adapter.getForegroundWindow());
+  const focusedWindow = safeHandle(adapter.getFocusedWindow());
   const discovered = discover(adapter);
   const codexWindow = safeHandle(discovered && discovered.handle);
   return {
     foregroundWindow,
+    focusedWindow,
     codexWindow,
     codexPlacement: codexWindow
       ? normalizePlacement(adapter.getWindowPlacement(codexWindow))
@@ -127,6 +138,7 @@ function captureState(adapter, discover = discoverCodexWindow) {
 function stateChanges(previous, current) {
   const changes = [];
   if (previous.foregroundWindow !== current.foregroundWindow) changes.push('foreground');
+  if (previous.focusedWindow !== current.focusedWindow) changes.push('focusedWindow');
   if (previous.codexWindow !== current.codexWindow) changes.push('codexWindow');
   if (JSON.stringify(previous.codexPlacement) !== JSON.stringify(current.codexPlacement)) {
     changes.push('placement');
@@ -169,10 +181,12 @@ function baseSummary(config, startedAtMs) {
     sampleCount: 0,
     changeCount: 0,
     foregroundChangeCount: 0,
+    focusedWindowChangeCount: 0,
     codexWindowChangeCount: 0,
     placementChangeCount: 0,
     missingCodexSampleCount: 0,
     minimizedViolationCount: 0,
+    protectedThreadViolationCount: 0,
     errorCount: 0,
     passed: true,
   };
@@ -189,13 +203,16 @@ async function runFocusSentinel(options = {}) {
     durationMs: Math.round(durationMs),
     intervalMs: Math.round(intervalMs),
     requireMinimized: options.requireMinimized === true,
+    protectedThreadId: String(options.protectedThreadId || '').trim().toLowerCase(),
   };
+  if (config.protectedThreadId && !THREAD_ID_PATTERN.test(config.protectedThreadId)) throw argumentError();
   const adapter = options.adapter;
   const clock = options.clock || { now: () => Date.now() };
   const sleep = typeof options.sleep === 'function'
     ? options.sleep
     : milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
   const writeEvent = typeof options.writeEvent === 'function' ? options.writeEvent : () => {};
+  const observeThread = typeof options.observeThread === 'function' ? options.observeThread : null;
   const discover = typeof options.discover === 'function' ? options.discover : discoverCodexWindow;
   const startedAtMs = clockValue(clock);
   const deadline = startedAtMs + config.durationMs;
@@ -211,9 +228,38 @@ async function runFocusSentinel(options = {}) {
       && summary.changeCount === 0
       && summary.missingCodexSampleCount === 0
       && summary.minimizedViolationCount === 0
+      && summary.protectedThreadViolationCount === 0
       && summary.errorCount === 0;
     await emit(summary);
     return { ...summary };
+  };
+  const verifyProtectedThread = async sequence => {
+    if (!config.protectedThreadId) return '';
+    let observation = null;
+    let observerUnavailable = false;
+    try {
+      if (!observeThread) observerUnavailable = true;
+      else observation = await observeThread();
+    } catch {
+      observerUnavailable = true;
+    }
+    const observedThreadId = observation && observation.confidence === 'exact'
+      ? String(observation.threadId || '').trim().toLowerCase()
+      : '';
+    const code = observerUnavailable
+      ? 'PROTECTED_THREAD_OBSERVER_UNAVAILABLE'
+      : !observedThreadId
+        ? 'PROTECTED_THREAD_SELECTION_ABSENT'
+      : observedThreadId !== config.protectedThreadId
+        ? 'PROTECTED_THREAD_CHANGED'
+        : '';
+    if (!code) return '';
+    summary.protectedThreadViolationCount += 1;
+    await emit({
+      type: 'violation', schemaVersion: SCHEMA_VERSION, sequence,
+      at: isoTime(clockValue(clock)), code,
+    });
+    return code;
   };
 
   await emit({
@@ -264,6 +310,8 @@ async function runFocusSentinel(options = {}) {
     });
     return finish('CODEX_WINDOW_NOT_MINIMIZED');
   }
+  const initialThreadViolation = await verifyProtectedThread(sequence);
+  if (initialThreadViolation) return finish(initialThreadViolation);
 
   while (clockValue(clock) < deadline) {
     const beforeSleep = clockValue(clock);
@@ -293,6 +341,8 @@ async function runFocusSentinel(options = {}) {
     }
 
     if (!current.codexWindow || !current.codexPlacement) summary.missingCodexSampleCount += 1;
+    const threadViolation = await verifyProtectedThread(sequence);
+    if (threadViolation) return finish(threadViolation);
     if (config.requireMinimized && current.codexPlacement && !minimized(current.codexPlacement)) {
       summary.minimizedViolationCount += 1;
       await emit({
@@ -308,6 +358,7 @@ async function runFocusSentinel(options = {}) {
     if (changes.length > 0) {
       summary.changeCount += 1;
       if (changes.includes('foreground')) summary.foregroundChangeCount += 1;
+      if (changes.includes('focusedWindow')) summary.focusedWindowChangeCount += 1;
       if (changes.includes('codexWindow')) summary.codexWindowChangeCount += 1;
       if (changes.includes('placement')) summary.placementChangeCount += 1;
       await emit({
@@ -348,6 +399,7 @@ function usage() {
     '  --duration <seconds>    Sampling duration (default: 3600)',
     '  --interval <ms>         Sampling interval (default: 1000)',
     '  --require-minimized     Fail unless Codex stays minimized',
+    '  --protected-thread <id> Fail immediately if exact desktop task changes',
   ].join('\n');
 }
 
@@ -365,6 +417,15 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
       fs: dependencies.fs,
     });
     const adapter = dependencies.adapter || new Win32FocusAdapter();
+    let observeThread = dependencies.observeThread;
+    if (config.protectedThreadId && typeof observeThread !== 'function') {
+      try {
+        const createThreadObserver = dependencies.createThreadObserver || createCodexCdpSelectionObserver;
+        observeThread = createThreadObserver();
+      } catch (error) {
+        observeThread = async () => { throw error; };
+      }
+    }
     const summary = await runFocusSentinel({
       ...config,
       adapter,
@@ -372,6 +433,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
       sleep: dependencies.sleep,
       writeEvent,
       discover: dependencies.discover,
+      observeThread,
     });
     stdout(JSON.stringify(summary));
     return summary.passed ? 0 : 2;

@@ -9,6 +9,7 @@ const {
   ProductionEventRuntime,
   createSessionResolver,
 } = require('../lib/events/production-event-runtime');
+const { TurnDiffStore } = require('../lib/events/turn-diff-store');
 
 const THREAD = '11111111-2222-4333-8444-555555555555';
 const OTHER_THREAD = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -297,6 +298,44 @@ test('RPC sequence gaps and connection rotation rehydrate registered threads fro
     params: { threadId: THREAD, status: { type: 'idle' } },
   });
   assert.equal((await runtime.snapshot(THREAD)).snapshotVersion, rehydrated.snapshotVersion + 1);
+});
+
+test('authoritative turn diff survives runtime restart and file rehydrate without operation guessing', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-runtime-turn-diff-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { runtime, source, paths } = createHarness();
+  runtime.turnDiffStore = new TurnDiffStore({ file: path.join(root, 'turn-diffs.json') });
+  await runtime.read(THREAD, {});
+  await runtime.ingestRpcNotification({
+    connectionEpoch: 1,
+    sequence: 1,
+    method: 'turn/diff/updated',
+    params: {
+      threadId: THREAD,
+      turnId: 'turn-main',
+      diff: 'diff --git a/src/a.js b/src/a.js\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n',
+    },
+  });
+  const live = await runtime.snapshot(THREAD);
+  assert.deepEqual(live.events.find(event => event.toolKind === 'diff').turnDiff.files.map(file => file.fileLabel), ['src/a.js']);
+
+  const restarted = new ProductionEventRuntime({
+    serverInstanceId: 'server-production-restarted',
+    fileSource: source,
+    turnDiffStore: new TurnDiffStore({ file: path.join(root, 'turn-diffs.json') }),
+    resolveSession(threadId) {
+      const filePath = paths.get(threadId);
+      return filePath ? { filePath, session: { isSubagent: false } } : null;
+    },
+  });
+  const restored = await restarted.snapshot(THREAD);
+  const restoredDiffs = restored.events.filter(event => event.toolKind === 'diff');
+  assert.equal(restoredDiffs.length, 1);
+  assert.deepEqual(restoredDiffs[0].turnDiff, live.events.find(event => event.toolKind === 'diff').turnDiff);
+
+  source.append(paths.get(THREAD), eventItem('task_complete', 'turn-main', '2026-07-10T00:03:00.000Z'));
+  await restarted.read(THREAD, {});
+  assert.equal((await restarted.snapshot(THREAD)).events.filter(event => event.toolKind === 'diff').length, 1);
 });
 
 test('RPC notifications serialize by epoch, keep sequence monotonic, and drop an older epoch', async () => {

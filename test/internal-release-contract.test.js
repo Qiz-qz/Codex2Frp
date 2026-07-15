@@ -8,17 +8,17 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('public 1.3.0 release sources stay version-aligned and document the internal capability line', () => {
+test('public 1.4.0 release sources stay version-aligned and documented', () => {
   const pkg = JSON.parse(read('package.json'));
   const launcher = read('windows/launcher/Codex2FrpLauncher.cs');
   const manifest = read('windows/installer/Codex2FrpSetup.manifest');
   const readme = read('README.md');
   const changelog = read('CHANGELOG.md');
-  assert.equal(pkg.version, '1.3.0');
-  assert.match(launcher, /internal const string AppVersion = "1\.3\.0";/);
-  assert.match(manifest, /assemblyIdentity version="1\.3\.0\.0"/);
-  assert.match(readme, /Current version: `v1\.3\.0`/);
-  assert.match(readme, /internal Codex2Frp 2\.3\.0 capability line/);
-  assert.match(changelog, /## \[1\.3\.0\]/);
-  for (const topic of ['Codex compatibility', 'durable queue', 'window focus', 'message privacy']) assert.match(changelog, new RegExp(topic, 'i'));
+  assert.equal(pkg.version, '1.4.0');
+  assert.match(launcher, /internal const string AppVersion = "1\.4\.0";/);
+  assert.match(manifest, /assemblyIdentity version="1\.4\.0\.0"/);
+  assert.match(readme, /Current version: `v1\.4\.0`/);
+  assert.match(readme, /internal Codex2Frp 2\.4\.0 capability line/i);
+  assert.match(changelog, /## \[1\.4\.0\]/);
+  for (const topic of ['Codex 0.144.2', 'timeline', 'adjacent', 'selection', 'capability']) assert.match(changelog, new RegExp(topic, 'i'));
 });

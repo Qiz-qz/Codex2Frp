@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "desktop": { "appVersion": "26.707.9981.0", "cliVersion": "0.144.2" },
+  "observation": {
+    "exactDesktopUuidAvailable": false,
+    "reason": "exact_desktop_selection_unavailable",
+    "fallback": "protected_thread_api_identity_and_no_test_prompt_scope_audit",
+    "mustGuessFromTitleBodyRecencyOrStatus": false
+  },
+  "automation": {
+    "packagedHost": "ChatGPT.exe",
+    "windowsUiAutomationAllowed": false,
+    "exactSeparateWindowInteractionPerformed": false
+  },
+  "sentinelComparison": {
+    "algorithm": "HMAC-SHA256 with discarded ephemeral key",
+    "storesRawHandlesTitlesUuids": false,
+    "baselineSamples": 3,
+    "endSamples": 3,
+    "baselinePassed": true,
+    "endPassed": true,
+    "baselineChanges": 0,
+    "endChanges": 0,
+    "baselineViolations": 0,
+    "endViolations": 0,
+    "baselineErrors": 0,
+    "endErrors": 0,
+    "fields": {
+      "foreground": { "baseline": "45cf80afa9a260bc6ceb5518615f6dfe5dcde125cde760736d93668607d2c1d9", "end": "45cf80afa9a260bc6ceb5518615f6dfe5dcde125cde760736d93668607d2c1d9", "equal": true },
+      "focus": { "baseline": "45cf80afa9a260bc6ceb5518615f6dfe5dcde125cde760736d93668607d2c1d9", "end": "45cf80afa9a260bc6ceb5518615f6dfe5dcde125cde760736d93668607d2c1d9", "equal": true },
+      "codexWindow": { "baseline": "71a08a52c1199ca463f46a5e68582f53e1197684f8f0269aedb6b4425cfd9566", "end": "71a08a52c1199ca463f46a5e68582f53e1197684f8f0269aedb6b4425cfd9566", "equal": true },
+      "placement": { "baseline": "6dbb3e63e005b8b07fd7577879d956dadd90244c596804557bfc5acc4e46ec90", "end": "6dbb3e63e005b8b07fd7577879d956dadd90244c596804557bfc5acc4e46ec90", "equal": true },
+      "minimized": { "baseline": "931b6527f185bdb4bd0c71a880411f84e714aebf888d71595bdaacc73785e556", "end": "931b6527f185bdb4bd0c71a880411f84e714aebf888d71595bdaacc73785e556", "equal": true }
+    }
+  }
+}

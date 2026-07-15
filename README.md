@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.3.0`.
+Current version: `v1.4.0`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.3.0 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.0 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -27,7 +27,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.3.0/              Latest public installer release
+release/v1.4.0/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -36,25 +36,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.3.0/Codex2FrpSetup-v1.3.0.exe
+release/v1.4.0/Codex2FrpSetup-v1.4.0.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.3.0/SHA256SUMS.txt
+release/v1.4.0/SHA256SUMS.txt
 ```
 
-The current SHA-256 is:
+The current SHA-256 is recorded in:
 
 ```text
-bd48da5f1d47b4dd471acdc811734bc7dc690fb74cadcc00ba5d9ba4bdacda7a  Codex2FrpSetup-v1.3.0.exe
+release/v1.4.0/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.3.0.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.0.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -115,6 +115,18 @@ All API calls require the local access token.
 Common endpoints:
 
 - `GET /codex/health`
+- `GET /codex/v3/meta`
+- `GET /codex/v3/diagnostics`
+- `GET /codex/v3/threads`
+- `GET /codex/v3/threads/:id/status`
+- `GET /codex/v3/threads/:id/events`
+- `GET /codex/v3/threads/:id/events/snapshot`
+- `GET /codex/v3/threads/:id/events/cursor`
+- `POST /codex/v3/threads/:id/input`
+- `GET /codex/v3/threads/:id/queue`
+- `PUT /codex/v3/threads/:id/protection`
+- `GET /codex/v3/catalogs/models`
+- `GET /codex/v3/catalogs/collaboration-modes`
 - `GET /codex/config`
 - `GET /codex/status`
 - `GET /codex/threads`
@@ -182,6 +194,18 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.0
+
+- Negotiates the Codex 0.144.2 app-server schema from observed schema hashes and critical union shapes instead of relying only on a CLI version label.
+- Publishes the desktop-visible timeline with narrative boundaries and consecutively grouped safe operation details, while suppressing hidden reasoning, raw tool payloads, local paths, and subagent content.
+- Fails closed when desktop task selection cannot be confirmed, preventing stale or guessed cross-device task state.
+- Distinguishes method availability, runtime readiness, confirmed mutations, and readback support so clients expose only verified controls.
+- Preserves stable user-message and same-name attachment identity across snapshots, deltas, history reconciliation, and backend restarts.
+- Publishes safe desktop lifecycle duration and repeated subagent lifecycle updates while limiting every subagent event to a sanitized name and state.
+- Filters collaboration catalogs to complete authoritative presets; incomplete future rows, plugins, and subagents never become invented collaboration modes.
+- Persists authoritative per-turn diffs, including binary changes and safely decoded Git paths, so clients can reproduce the desktop file disclosure after restart.
+- Rejects Codex internal environment context per message part while preserving ordinary visible user text, XML examples, and supported attachments.
 
 ### v1.3.0
 

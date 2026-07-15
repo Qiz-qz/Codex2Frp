@@ -36,15 +36,18 @@ test('adapter captures foreground HWND and complete WINDOWPLACEMENT visibility s
     runner(operation, payload) {
       calls.push({ operation, payload: clone(payload) });
       if (operation === 'getForegroundWindow') return { handle: '7001' };
+      if (operation === 'getFocusedWindow') return { handle: '7002' };
       if (operation === 'getWindowPlacement') return { placement: clone(MINIMIZED_PLACEMENT) };
       throw new Error(`unexpected ${operation}`);
     },
   });
 
   assert.equal(adapter.getForegroundWindow(), '7001');
+  assert.equal(adapter.getFocusedWindow(), '7002');
   assert.deepEqual(adapter.getWindowPlacement('9001'), MINIMIZED_PLACEMENT);
   assert.deepEqual(calls, [
     { operation: 'getForegroundWindow', payload: {} },
+    { operation: 'getFocusedWindow', payload: {} },
     { operation: 'getWindowPlacement', payload: { handle: '9001' } },
   ]);
 });
@@ -61,6 +64,7 @@ test('adapter restores the full captured placement and exposes activation primit
   assert.equal(adapter.setWindowPlacement('9001', MINIMIZED_PLACEMENT), true);
   assert.equal(adapter.activateWindow('9001'), true);
   assert.equal(adapter.setForegroundWindow('7001'), true);
+  assert.equal(adapter.setFocusedWindow('7002'), true);
   assert.equal(adapter.isWindow('7001'), true);
   assert.deepEqual(calls, [
     {
@@ -69,6 +73,7 @@ test('adapter restores the full captured placement and exposes activation primit
     },
     { operation: 'activateWindow', payload: { handle: '9001' } },
     { operation: 'setForegroundWindow', payload: { handle: '7001' } },
+    { operation: 'setFocusedWindow', payload: { handle: '7002' } },
     { operation: 'isWindow', payload: { handle: '7001' } },
   ]);
 });
@@ -100,7 +105,7 @@ test('adapter normalizes enumerated Win32 windows for strict Codex discovery', (
   }]);
 });
 
-test('PowerShell runner uses encoded no-shell execution and contains the required Win32 APIs', () => {
+test('PowerShell runner streams the native bridge over stdin to avoid Windows command-line limits', () => {
   let invocation;
   const runner = createPowerShellWin32Runner({
     platform: 'win32',
@@ -113,16 +118,21 @@ test('PowerShell runner uses encoded no-shell execution and contains the require
 
   assert.deepEqual(runner('getForegroundWindow', {}), { handle: '7001' });
   assert.equal(invocation.file.endsWith('powershell.exe'), true);
-  assert.deepEqual(invocation.args.slice(0, 5), [
+  assert.deepEqual(invocation.args, [
     '-NoProfile',
     '-NonInteractive',
     '-ExecutionPolicy',
     'Bypass',
-    '-EncodedCommand',
+    '-Command',
+    '$input | Out-String | Invoke-Expression',
   ]);
-  assert.equal(invocation.options.windowsHide, true);
+  assert.equal(invocation.options.windowsHide, false);
   assert.equal(invocation.options.shell, false);
-  const script = Buffer.from(invocation.args[5], 'base64').toString('utf16le');
+  assert.equal(invocation.options.encoding, 'utf8');
+  const script = invocation.options.input;
+  assert.equal(typeof script, 'string');
+  assert.ok(Buffer.from(script, 'utf16le').toString('base64').length > 32_767,
+    'the former encoded-command argument exceeds the Windows command-line limit');
   for (const api of [
     'EnumWindows',
     'GetForegroundWindow',
@@ -167,6 +177,7 @@ test('PowerShell runner fails closed off Windows without invoking a process', ()
 function createStatefulNativeRunner() {
   const state = {
     foreground: '7001',
+    focused: '7002',
     target: '9001',
     placement: clone(MINIMIZED_PLACEMENT),
     calls: [],
@@ -185,10 +196,13 @@ function createStatefulNativeRunner() {
         }] };
       case 'getForegroundWindow':
         return { handle: state.foreground };
+      case 'getFocusedWindow':
+        return { handle: state.focused };
       case 'getWindowPlacement':
         return { placement: clone(state.placement) };
       case 'activateWindow':
         state.foreground = String(payload.handle);
+        state.focused = '9002';
         state.placement = {
           ...state.placement,
           showCmd: 1,
@@ -201,6 +215,9 @@ function createStatefulNativeRunner() {
         return { ok: true };
       case 'setForegroundWindow':
         state.foreground = String(payload.handle);
+        return { ok: true };
+      case 'setFocusedWindow':
+        state.focused = String(payload.handle);
         return { ok: true };
       case 'isWindow':
         return { ok: true };
@@ -237,6 +254,7 @@ test('real adapter contract composes with UI transaction and restores captured v
   });
 
   assert.equal(native.state.foreground, '7001');
+  assert.equal(native.state.focused, '7002');
   assert.deepEqual(native.state.placement, originalPlacement);
   const restoreCall = native.state.calls.find(call => call.operation === 'setWindowPlacement');
   assert.deepEqual(restoreCall.payload.placement, originalPlacement);
@@ -266,6 +284,7 @@ test('real adapter contract does not steal focus back after a user selects anoth
   });
 
   assert.equal(native.state.foreground, '8001');
+  assert.equal(native.state.focused, '9002');
   assert.equal(
     native.state.calls.some(call => call.operation === 'setForegroundWindow' && call.payload.handle === '7001'),
     false,

@@ -2,9 +2,40 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { appendProjectedActivity } = require('../lib/events/activity-projection');
+const { appendProjectedActivity, sanitizePublicAttachments } = require('../lib/events/activity-projection');
+const { setPrivateAttachmentSource } = require('../lib/events/private-attachment-source');
 
-test('durable activities aggregate by kind and variant while details preserve order', () => {
+test('timeline attachments use the same strict public allowlist', () => {
+  const attachments = sanitizePublicAttachments([
+    { name: 'safe.png', url: 'https://cdn.example/safe.png', filePath: 'E:\\private\\safe.png' },
+    { name: 'token.png', url: 'https://cdn.example/token.png?token=PRIVATE_TOKEN' },
+  ]);
+
+  assert.deepEqual(attachments, [{ name: 'safe.png' }, { name: 'token.png' }]);
+  assert.doesNotMatch(JSON.stringify(attachments), /private|PRIVATE_TOKEN/i);
+});
+
+test('public projection keeps same-basename images distinct when their private sources differ', () => {
+  const attachments = sanitizePublicAttachments([
+    setPrivateAttachmentSource({ name: 'same.png' }, 'E:\\ProtocolFixtures\\first\\same.png'),
+    setPrivateAttachmentSource({ name: 'same.png' }, 'E:\\ProtocolFixtures\\second\\same.png'),
+  ]);
+
+  assert.deepEqual(attachments, [{ name: 'same.png' }, { name: 'same.png' }]);
+  assert.equal(JSON.stringify(attachments).includes('ProtocolFixtures'), false);
+});
+
+test('capability identity preserves case-sensitive opaque handles', () => {
+  const attachments = sanitizePublicAttachments([
+    { name: 'same.png', url: '/codex/attachment/Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    { name: 'same.png', url: '/codex/attachment/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+  ]);
+
+  assert.equal(attachments.length, 2);
+  assert.notEqual(attachments[0].url, attachments[1].url);
+});
+
+test('durable activities aggregate only while visibly adjacent and details preserve order', () => {
   const process = { activities: [], detailActivities: [], detailCount: 0, counts: {} };
   appendProjectedActivity(process, {
     id: 'c1', kind: 'shell', state: 'succeeded', title: '已运行命令', count: 1,
@@ -16,10 +47,10 @@ test('durable activities aggregate by kind and variant while details preserve or
     id: 'c2', kind: 'shell', state: 'failed', title: '命令执行失败', count: 1,
   });
 
-  assert.deepEqual(process.activities.map(item => item.kind), ['shell', 'file']);
-  assert.equal(process.activities[0].count, 2);
-  assert.equal(process.activities[0].failedCount, 1);
-  assert.equal(process.activities[0].title, '已运行 2 条命令 · 1 条失败');
+  assert.deepEqual(process.activities.map(item => item.kind), ['shell', 'file', 'shell']);
+  assert.equal(process.activities[0].count, 1);
+  assert.equal(process.activities[2].failedCount, 1);
+  assert.equal(process.activities[2].title, '已运行 1 条命令 · 1 条失败');
   assert.deepEqual(process.detailActivities.map(item => item.id), ['c1', 'f1', 'c2']);
   assert.equal(process.detailCount, 3);
 });
@@ -96,7 +127,7 @@ test('activity projection strictly allowlists public fields and safe attachment 
     attachments: [
       {
         name: 'safe.png', mime: 'image/png', mimeType: 'image/png', size: 42, count: 1,
-        url: 'https://cdn.example/safe.png', thumbnailUrl: '/codex/attachment/opaque_capability',
+        url: 'https://cdn.example/safe.png', thumbnailUrl: '/codex/attachment/0123456789abcdef0123456789abcdef',
         path: 'ATTACHMENT_PATH_CANARY', filePath: 'ATTACHMENT_FILE_CANARY',
         dataUrl: 'data:image/png;base64,ATTACHMENT_DATA_CANARY',
         raw: 'ATTACHMENT_RAW_CANARY',
@@ -106,7 +137,8 @@ test('activity projection strictly allowlists public fields and safe attachment 
       { name: 'fragment.png', url: 'https://cdn.example/fragment.png#FRAGMENT_CANARY' },
       { name: 'userinfo.png', url: 'https://user:pass@cdn.example/userinfo.png' },
       { name: 'data.png', url: 'data:image/png;base64,URL_DATA_CANARY' },
-      { name: 'capability.png', url: 'http://phone.local/codex/attachment/opaque_capability' },
+      { name: 'capability.png', url: '/codex/attachment/0123456789abcdef0123456789abcdef' },
+      { name: 'foreign-capability.png', url: 'https://evil.example/codex/attachment/0123456789abcdef0123456789abcdef' },
     ],
   });
 
@@ -114,10 +146,10 @@ test('activity projection strictly allowlists public fields and safe attachment 
   assert.deepEqual(Object.keys(activity).sort(), [
     'attachments', 'count', 'id', 'kind', 'state', 'subagent', 'title', 'variant',
   ]);
-  assert.deepEqual(activity.subagent, { name: 'worker', action: 'enabled', state: 'running' });
+  assert.deepEqual(activity.subagent, { name: 'worker', state: 'running' });
   assert.deepEqual(activity.attachments[0], {
     name: 'safe.png', mime: 'image/png', mimeType: 'image/png', size: 42, count: 1,
-    url: 'https://cdn.example/safe.png', thumbnailUrl: '/codex/attachment/opaque_capability',
+    thumbnailUrl: '/codex/attachment/0123456789abcdef0123456789abcdef',
   });
   assert.equal(activity.attachments.find(item => item.name === 'token.png').url, undefined);
   assert.equal(activity.attachments.find(item => item.name === 'fragment.png').url, undefined);
@@ -125,8 +157,9 @@ test('activity projection strictly allowlists public fields and safe attachment 
   assert.equal(activity.attachments.find(item => item.name === 'data.png').url, undefined);
   assert.equal(
     activity.attachments.find(item => item.name === 'capability.png').url,
-    'http://phone.local/codex/attachment/opaque_capability',
+    '/codex/attachment/0123456789abcdef0123456789abcdef',
   );
+  assert.equal(activity.attachments.find(item => item.name === 'foreign-capability.png').url, undefined);
   const serialized = JSON.stringify(process);
   for (const canary of [
     'BODY_CANARY', 'ARGUMENTS_CANARY', 'OUTPUT_CANARY', 'PAYLOAD_CANARY', 'RAW_CANARY', 'PATH_CANARY', 'FILE_PATH_CANARY',
@@ -143,20 +176,21 @@ test('activity projection exposes only structured safe execution metadata and no
   appendProjectedActivity(process, {
     id: 'metadata', kind: 'mcp', state: 'succeeded', title: 'MCP', operation: 'openPage',
     server: 'browser', tool: 'open', namespace: 'public.tools', durationMs: 1250,
-    exitCode: 0, background: true, body: 'BODY_SECRET', arguments: 'ARG_SECRET', output: 'OUT_SECRET', payload: 'PAYLOAD_SECRET',
+    exitCode: 0, background: true, sourceOrdinal: 9,
+    body: 'BODY_SECRET', arguments: 'ARG_SECRET', output: 'OUT_SECRET', payload: 'PAYLOAD_SECRET',
   });
   appendProjectedActivity(process, {
     id: 'subagent', kind: 'subagent', state: 'running', title: 'worker', operation: 'SECRET',
-    server: 'SECRET', tool: 'SECRET', namespace: 'SECRET', durationMs: 2, exitCode: 1, background: true,
+    server: 'SECRET', tool: 'SECRET', namespace: 'SECRET', durationMs: 2, exitCode: 1, background: true, sourceOrdinal: 9,
     subagent: { name: 'worker', action: 'enabled', state: 'running', prompt: 'PROMPT_SECRET' },
   });
   assert.deepEqual(process.detailActivities[0], {
     id: 'metadata', kind: 'mcp', state: 'succeeded', title: 'MCP', operation: 'openPage',
-    server: 'browser', tool: 'open', namespace: 'public.tools', durationMs: 1250, exitCode: 0, background: true,
+    server: 'browser', tool: 'open', namespace: 'public.tools', durationMs: 1250, exitCode: 0, background: true, sourceOrdinal: 9,
   });
   assert.deepEqual(process.detailActivities[1], {
     id: 'subagent', kind: 'subagent', state: 'running', title: 'worker',
-    subagent: { name: 'worker', action: 'enabled', state: 'running' },
+    subagent: { name: 'worker', state: 'running' },
   });
   for (const secret of ['BODY_SECRET','ARG_SECRET','OUT_SECRET','PAYLOAD_SECRET','PROMPT_SECRET']) assert.equal(JSON.stringify(process).includes(secret), false);
 });
@@ -168,11 +202,11 @@ test('late image attachments merge after an attachment-free running update', () 
   });
   appendProjectedActivity(process, {
     id: 'image-complete', kind: 'image', variant: 'imageGeneration', state: 'succeeded', count: 1,
-    attachments: [{ name: 'result.png', url: 'https://cdn.example/result.png' }],
+    attachments: [{ name: 'result.png', url: '/codex/attachment/0123456789abcdef0123456789abcdef' }],
   });
 
   assert.deepEqual(process.activities[0].attachments, [
-    { name: 'result.png', url: 'https://cdn.example/result.png' },
+    { name: 'result.png', url: '/codex/attachment/0123456789abcdef0123456789abcdef' },
   ]);
 });
 
@@ -183,7 +217,7 @@ test('adjacent image views group but separated image views create stable segment
   appendProjectedActivity(process, { id: 'shell', kind: 'shell', state: 'succeeded', count: 1 });
   appendProjectedActivity(process, { id: 'c', kind: 'image', variant: 'imageView', state: 'succeeded', count: 1 });
   assert.deepEqual(process.activities.map(item => item.id), ['turn-images-summary-image:imageView-1', 'turn-images-summary-shell', 'turn-images-summary-image:imageView-2']);
-  assert.deepEqual(process.activities.map(item => item.title), ['已查看 2 张图像', process.activities[1].title, '已查看一张图像']);
+  assert.deepEqual(process.activities.map(item => item.title), ['已查看 2 张图像', process.activities[1].title, '已查看 1 张图像']);
 });
 
 test('reasoning remains one transient metadata row without exposing body content', () => {
@@ -209,4 +243,18 @@ test('interactive activities remain independent first-level rows', () => {
 
   assert.deepEqual(process.activities.map(item => item.id), ['a1', 'a2']);
   assert.deepEqual(process.detailActivities.map(item => item.id), ['a1', 'a2']);
+});
+
+test('legacy activity projection treats visible intervening rows as aggregation boundaries', () => {
+  const process = { turnId: 'turn-adjacent', activities: [], detailActivities: [], detailCount: 0, counts: {} };
+  appendProjectedActivity(process, { id: 'c1', kind: 'shell', state: 'succeeded', count: 1 });
+  appendProjectedActivity(process, { id: 'c2', kind: 'shell', state: 'succeeded', count: 1 });
+  appendProjectedActivity(process, { id: 'note', kind: 'commentary', state: 'succeeded', title: 'Next step' });
+  appendProjectedActivity(process, { id: 'c3', kind: 'shell', state: 'succeeded', count: 1 });
+  appendProjectedActivity(process, { id: 'c4', kind: 'shell', state: 'succeeded', count: 1 });
+
+  assert.deepEqual(process.activities.map(item => [item.kind, item.count]), [
+    ['shell', 2], ['commentary', 1], ['shell', 2],
+  ]);
+  assert.notEqual(process.activities[0].id, process.activities[2].id);
 });

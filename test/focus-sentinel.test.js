@@ -67,6 +67,12 @@ function harness(states, options = {}) {
       if (state.error) throw state.error;
       return state.foregroundWindow || '7001';
     },
+    getFocusedWindow() {
+      calls.push('getFocusedWindow');
+      const state = stateAt();
+      if (state.error) throw state.error;
+      return state.focusedWindow || '7002';
+    },
     getWindowPlacement() {
       calls.push('getWindowPlacement');
       const state = stateAt();
@@ -93,6 +99,7 @@ test('parseArgs exposes one-hour safe defaults and explicit reusable CLI control
     intervalMs: 1000,
     outputFile: 'focus.jsonl',
     requireMinimized: false,
+    protectedThreadId: '',
     help: false,
   });
   assert.deepEqual(parseArgs([
@@ -105,8 +112,13 @@ test('parseArgs exposes one-hour safe defaults and explicit reusable CLI control
     intervalMs: 250,
     outputFile: 'audit.jsonl',
     requireMinimized: true,
+    protectedThreadId: '',
     help: false,
   });
+  assert.equal(parseArgs([
+    '--output', 'audit.jsonl',
+    '--protected-thread', '11111111-2222-4333-8444-555555555555',
+  ]).protectedThreadId, '11111111-2222-4333-8444-555555555555');
 });
 
 test('parseArgs rejects missing output, invalid numbers, and unknown flags without echoing values', () => {
@@ -129,6 +141,7 @@ test('captureState uses existing discovery while allowlisting handles and comple
 
   assert.deepEqual(state, {
     foregroundWindow: '7001',
+    focusedWindow: '7002',
     codexWindow: '9001',
     codexPlacement: {
       flags: 2,
@@ -165,6 +178,7 @@ test('stable sampling stays read-only and emits an initial state plus a passing 
   assert.equal(h.calls.every(call => [
     'listTopLevelWindows',
     'getForegroundWindow',
+    'getFocusedWindow',
     'getWindowPlacement',
   ].includes(call)), true);
 });
@@ -226,6 +240,66 @@ test('require-minimized fails fast without changing a normal Codex window', asyn
   assert.equal(summary.sampleCount, 1);
   assert.equal(sleepCalls, 0);
   assert.equal(h.calls.includes('setWindowPlacement'), false);
+});
+
+test('focused HWND changes are recorded independently and fail the sentinel', async () => {
+  const h = harness([{}, { focusedWindow: '8002' }]);
+  const summary = await runFocusSentinel({
+    adapter: h.adapter, clock: h.clock, sleep: h.sleep, writeEvent: h.writeEvent,
+    durationMs: 1000, intervalMs: 1000,
+  });
+  assert.equal(summary.passed, false);
+  assert.equal(summary.focusedWindowChangeCount, 1);
+  assert.deepEqual(h.events.find(event => event.type === 'change').changes, ['focusedWindow']);
+});
+
+test('protected task sentinel fails immediately when the exact desktop UUID changes', async () => {
+  const h = harness([{}, {}, {}]);
+  let reads = 0;
+  const summary = await runFocusSentinel({
+    adapter: h.adapter, clock: h.clock, sleep: h.sleep, writeEvent: h.writeEvent,
+    durationMs: 5000, intervalMs: 1000,
+    protectedThreadId: '11111111-2222-4333-8444-555555555555',
+    observeThread: async () => ({
+      threadId: reads++ === 0
+        ? '11111111-2222-4333-8444-555555555555'
+        : 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      confidence: 'exact',
+    }),
+  });
+  assert.equal(summary.passed, false);
+  assert.equal(summary.reasonCode, 'PROTECTED_THREAD_CHANGED');
+  assert.equal(summary.protectedThreadViolationCount, 1);
+  assert.equal(summary.sampleCount, 2);
+  assert.equal(h.events.at(-2).code, 'PROTECTED_THREAD_CHANGED');
+});
+
+test('protected task sentinel fails closed when exact selection becomes unavailable', async () => {
+  const h = harness([{}, {}]);
+  let reads = 0;
+  const summary = await runFocusSentinel({
+    adapter: h.adapter, clock: h.clock, sleep: h.sleep, writeEvent: h.writeEvent,
+    durationMs: 5000, intervalMs: 1000,
+    protectedThreadId: '11111111-2222-4333-8444-555555555555',
+    observeThread: async () => reads++ === 0
+      ? { threadId: '11111111-2222-4333-8444-555555555555', confidence: 'exact' }
+      : null,
+  });
+  assert.equal(summary.passed, false);
+  assert.equal(summary.reasonCode, 'PROTECTED_THREAD_SELECTION_ABSENT');
+  assert.equal(summary.protectedThreadViolationCount, 1);
+  assert.equal(summary.sampleCount, 2);
+});
+
+test('protected task sentinel distinguishes observer failure from an absent selection', async () => {
+  const h = harness([{}]);
+  const summary = await runFocusSentinel({
+    adapter: h.adapter, clock: h.clock, sleep: h.sleep, writeEvent: h.writeEvent,
+    durationMs: 1000, intervalMs: 1000,
+    protectedThreadId: '11111111-2222-4333-8444-555555555555',
+    observeThread: async () => { throw new Error('transport unavailable'); },
+  });
+  assert.equal(summary.reasonCode, 'PROTECTED_THREAD_OBSERVER_UNAVAILABLE');
 });
 
 test('a missing initial Codex window fails fast with a stable summary', async () => {
@@ -329,4 +403,44 @@ test('main writes only the final summary to stdout and maps pass, violation, and
     schemaVersion: 1,
     code: 'FOCUS_SENTINEL_ARGUMENT_INVALID',
   });
+});
+
+test('CLI protected-thread mode constructs and uses the real-observer dependency', async () => {
+  const h = harness([{}, {}]);
+  let factoryCalls = 0;
+  let observerCalls = 0;
+  const stdout = [];
+  const code = await main([
+    '--duration', '1', '--interval', '1000', '--output', 'unused.jsonl',
+    '--protected-thread', '11111111-2222-4333-8444-555555555555',
+  ], {
+    adapter: h.adapter, clock: h.clock, sleep: h.sleep, writeEvent: h.writeEvent,
+    stdout: value => stdout.push(value),
+    createThreadObserver() {
+      factoryCalls += 1;
+      return async () => {
+        observerCalls += 1;
+        return { threadId: '11111111-2222-4333-8444-555555555555', confidence: 'exact' };
+      };
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(factoryCalls, 1);
+  assert.equal(observerCalls, 2);
+  assert.equal(JSON.parse(stdout[0]).passed, true);
+});
+
+test('CLI protected-thread mode reports observer construction failure separately', async () => {
+  const h = harness([{}]);
+  const stdout = [];
+  const code = await main([
+    '--duration', '1', '--interval', '1000', '--output', 'unused.jsonl',
+    '--protected-thread', '11111111-2222-4333-8444-555555555555',
+  ], {
+    adapter: h.adapter, clock: h.clock, sleep: h.sleep, writeEvent: h.writeEvent,
+    stdout: value => stdout.push(value),
+    createThreadObserver() { throw new Error('CDP unavailable'); },
+  });
+  assert.equal(code, 2);
+  assert.equal(JSON.parse(stdout[0]).reasonCode, 'PROTECTED_THREAD_OBSERVER_UNAVAILABLE');
 });

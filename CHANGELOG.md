@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0] - 2026-07-16
+
+This public snapshot corresponds to the internal Codex2Frp 2.4.0 capability line while preserving the public repository's independent version history.
+
+- Codex 0.144.2 app-server schema negotiation now uses observed schema hashes and critical union shapes instead of treating the CLI version as a compatibility gate.
+- The public timeline preserves desktop-visible narrative and safe operation detail while suppressing hidden reasoning, raw tool payloads, local paths, and subagent content.
+- Adjacent command, file, image, and related operations are grouped only while visibly consecutive; narrative boundaries split later operations into a new group.
+- Exact task selection observation fails closed when the desktop cannot confirm the requested UUID.
+- Capability reporting distinguishes method availability, runtime readiness, confirmed mutations, and readback support.
+- User-message and same-name attachment identities remain stable across snapshots, deltas, history reconciliation, and restarts.
+- Desktop lifecycle duration and repeated subagent lifecycle updates are preserved without exposing subagent content or identifiers.
+- Collaboration catalogs retain only complete authoritative presets and fail closed instead of treating plugins, subagents, or incomplete future rows as modes.
+- Authoritative turn diffs persist across restarts, preserve binary changes, and safely decode real Git paths with spaces or quoted UTF-8 names.
+- Strict per-part filtering removes Codex internal environment context without hiding ordinary user-authored XML or visible attachments.
+- Desktop image-view, file-edit, command, mixed-operation, transient thought, and user-attachment shapes are projected with stable chronological identity.
+
 ## [1.3.0] - 2026-07-13
 
 This public snapshot corresponds to the internal Codex2Frp 2.3.0 capability line while preserving the public repository's independent version history.

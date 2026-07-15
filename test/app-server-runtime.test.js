@@ -8,6 +8,7 @@ const { loadSchemaProfile } = require('../lib/app-server/schema-profile');
 const { AppServerRuntime } = require('../lib/app-server/runtime');
 
 const PROFILE_FILE = path.join(__dirname, 'fixtures', 'app-server', 'v0144-profile.json');
+const PROFILE_0144_2_FILE = path.join(__dirname, 'fixtures', 'app-server', 'v0144_2-profile.json');
 const CODEX_HOME = 'E:\\isolated\\runtime-home';
 
 class FakeProcessManager extends EventEmitter {
@@ -60,6 +61,7 @@ function createHarness(options = {}) {
           userAgent: 'codex_cli_rs/0.144.0-alpha.4 (Windows 11)',
         };
       },
+      ...options.serviceMethods,
     };
     services.push(service);
     return service;
@@ -67,7 +69,7 @@ function createHarness(options = {}) {
   const runtime = new AppServerRuntime({
     processManager,
     createService,
-    schemaProfile: loadSchemaProfile(PROFILE_FILE),
+    schemaProfile: loadSchemaProfile(options.profileFile || PROFILE_FILE),
     codexHome: CODEX_HOME,
     initializeParams: {
       clientInfo: { name: 'codex2frp', title: 'Codex2Frp', version: '2.2.0' },
@@ -79,9 +81,34 @@ function createHarness(options = {}) {
     bridgeOperations: ['turn.queueNext'],
     notificationSink: options.notificationSink,
     serverRequestSink: options.serverRequestSink,
+    confirmedNativeControls: options.confirmedNativeControls,
   });
   return { runtime, processManager, services, factoryCalls };
 }
+
+test('runtime capability metadata uses the full negotiated request inventory', async () => {
+  const { runtime } = createHarness({ profileFile: PROFILE_0144_2_FILE });
+  let operations = runtime.getMeta().capabilities.operations;
+  for (const operation of ['permissionProfile.list', 'plugin.list']) {
+    assert.deepEqual({
+      mode: operations[operation].mode,
+      available: operations[operation].available,
+      readbackSupported: operations[operation].readbackSupported,
+      reason: operations[operation].reason,
+    }, {
+      mode: 'rpc',
+      available: true,
+      readbackSupported: true,
+      reason: 'runtime_not_ready',
+    });
+  }
+  await runtime.ensureStarted();
+  operations = runtime.getMeta().capabilities.operations;
+  for (const operation of ['permissionProfile.list', 'plugin.list']) {
+    assert.equal(operations[operation].ready, true);
+    assert.equal(operations[operation].reason, null);
+  }
+});
 
 test('runtime forwards passive RPC notifications and removes only its listener on stop', async () => {
   const notifications = [];
@@ -216,8 +243,52 @@ test('metadata and capabilities are available without starting app-server or exp
     connectionEpoch: 0,
   });
   assert.equal(meta.capabilities.operations['thread.list'].mode, 'rpc');
+  assert.equal(meta.capabilities.operations['thread.list'].available, true);
+  assert.equal(meta.capabilities.operations['thread.list'].ready, false);
+  assert.equal(meta.capabilities.operations['thread.list'].reason, 'runtime_not_ready');
   assert.equal(meta.capabilities.operations['turn.queueNext'].mode, 'bridge');
   assert.equal(meta.capabilities.operations['composer.plus'].mode, 'unavailable');
+});
+
+test('runtime readiness dynamically enables negotiated methods without version checks', async () => {
+  const { runtime } = createHarness();
+  assert.equal(runtime.getMeta().capabilities.operations['model.list'].ready, false);
+
+  await runtime.ensureStarted();
+
+  const models = runtime.getMeta().capabilities.operations['model.list'];
+  assert.equal(models.available, true);
+  assert.equal(models.ready, true);
+  assert.equal(models.reason, null);
+  assert.equal(models.source, 'appServer');
+});
+
+test('runtime installs confirmed controls above the low-level service when production enables them', async () => {
+  const threadId = '11111111-2222-4333-8444-555555555555';
+  const harness = createHarness({
+    confirmedNativeControls: true,
+    serviceMethods: {
+      async startThread() { return { thread: { id: threadId } }; },
+      async readThread() { return { thread: { id: threadId } }; },
+      async updateThreadSettings() { return {}; },
+    },
+  });
+  const controls = await harness.runtime.ensureStarted();
+
+  assert.deepEqual(await controls.startThread({ model: 'gpt-5.5' }), {
+    status: 'confirmed',
+    operation: 'thread.start',
+    observation: { threadId },
+  });
+  assert.deepEqual(await controls.updateThreadSettings({ threadId, effort: 'high' }), {
+    status: 'confirmed',
+    operation: 'thread.settings',
+    observation: {
+      source: 'confirmedRequest',
+      readbackSupported: false,
+      settings: { effort: 'high' },
+    },
+  });
 });
 
 test('concurrent consumers coalesce one lazy start and initialize before service use', async () => {

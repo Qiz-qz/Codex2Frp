@@ -9,6 +9,40 @@ const {
   normalizeCodexCliVersion,
   profileFileForCliVersion,
 } = require('../lib/app-server/discovery');
+const { negotiateSchemaProfile, profiles } = require('../lib/app-server/schema-negotiator');
+const { selectBridgeSchemaProfile } = require('../lib/app-server/bridge-profile-selector');
+
+const PROFILE_0144_2 = require(path.join(
+  __dirname,
+  '..',
+  'lib',
+  'app-server',
+  'profiles',
+  'v0144_2-profile.json',
+));
+const PROFILE_0144 = require(path.join(
+  __dirname,
+  '..',
+  'lib',
+  'app-server',
+  'profiles',
+  'v0144-profile.json',
+));
+
+function legacyObservation(overrides = {}) {
+  const requestMethods = PROFILE_0144.requestMethods || PROFILE_0144.requiredRequestMethods;
+  const notificationMethods = PROFILE_0144.notificationMethods || PROFILE_0144.requiredNotificationMethods;
+  return {
+    schemaHash: PROFILE_0144.schemaHash || PROFILE_0144.schema.sha256,
+    requestMethods,
+    notificationMethods,
+    typeUnions: PROFILE_0144.typeUnions || {
+      'protocol/ClientRequest': requestMethods,
+      'protocol/ServerNotification': notificationMethods,
+    },
+    ...overrides,
+  };
+}
 
 test('CLI version detection uses a hidden no-shell process and parses stdout', () => {
   const calls = [];
@@ -75,6 +109,100 @@ test('version parser accepts current Codex output and rejects unrelated text', (
 test('profile selection is exact and fails closed for unknown CLI versions', () => {
   const known = profileFileForCliVersion('0.144.0-alpha.4');
   assert.equal(path.basename(known), 'v0144-profile.json');
+  assert.equal(path.basename(profileFileForCliVersion('0.144.2')), 'v0144_2-profile.json');
   assert.equal(profileFileForCliVersion('0.145.0'), '');
   assert.equal(profileFileForCliVersion(''), '');
+});
+
+test('0.144.2 negotiates by validated schema hash', () => {
+  const result = negotiateSchemaProfile({
+    cliVersion: '0.144.2',
+    schemaHash: PROFILE_0144_2.schemaHash,
+    methods: PROFILE_0144_2.requestMethods,
+    types: PROFILE_0144_2.typeUnions,
+  });
+  assert.equal(result.compatible, true);
+  assert.equal(result.profile.schemaHash, PROFILE_0144_2.schemaHash);
+});
+
+test('known version with a different union fails closed', () => {
+  const result = negotiateSchemaProfile({
+    cliVersion: '0.144.2', schemaHash: 'bad', methods: [], types: {},
+  });
+  assert.deepEqual(result, { compatible: false, profile: null, reason: 'schema_mismatch' });
+});
+
+test('matching hash with a different schema shape fails closed', () => {
+  const result = negotiateSchemaProfile({
+    cliVersion: '0.144.2',
+    schemaHash: PROFILE_0144_2.schemaHash,
+    methods: PROFILE_0144_2.requestMethods,
+    types: { ...PROFILE_0144_2.typeUnions, 'v2/MessagePhase': ['final_answer'] },
+  });
+  assert.deepEqual(result, { compatible: false, profile: null, reason: 'schema_shape_mismatch' });
+});
+
+test('negotiator loads both legacy and current schema profiles', () => {
+  assert.deepEqual(profiles().map(profile => profile.id).sort(), [
+    'app-server-v0144',
+    'app-server-v0144_2',
+  ]);
+});
+
+test('legacy pinned hash and shape negotiate to app-server-v0144', () => {
+  const observation = legacyObservation();
+  const result = negotiateSchemaProfile({
+    cliVersion: '0.144.0-alpha.4',
+    schemaHash: observation.schemaHash,
+    methods: observation.requestMethods,
+    types: observation.typeUnions,
+  });
+  assert.equal(result.compatible, true);
+  assert.equal(result.profile.id, 'app-server-v0144');
+});
+
+test('production selector can use the pinned legacy aggregate-file hash without weakening shape checks', () => {
+  const observation = legacyObservation({
+    schemaHash: 'e'.repeat(64),
+    schemaFileHashes: {
+      'codex_app_server_protocol.schemas.json': PROFILE_0144.schema.sha256,
+    },
+  });
+  const result = selectBridgeSchemaProfile({
+    executable: 'C:\\Codex\\codex.exe',
+    cliVersion: '0.144.0-alpha.4',
+    observeSchema: () => observation,
+  });
+  assert.equal(result.compatible, true);
+  assert.equal(result.profile.id, 'app-server-v0144');
+});
+
+test('production bridge rejects a detected 0.144.2 CLI when its observed schema drifts', () => {
+  const result = selectBridgeSchemaProfile({
+    executable: 'C:\\Codex\\codex.exe',
+    cliVersion: '0.144.2',
+    observeSchema: () => ({
+      schemaHash: 'f'.repeat(64),
+      requestMethods: PROFILE_0144_2.requestMethods,
+      notificationMethods: PROFILE_0144_2.notificationMethods,
+      typeUnions: PROFILE_0144_2.typeUnions,
+    }),
+  });
+  assert.deepEqual(result, { compatible: false, profile: null, reason: 'schema_mismatch' });
+});
+
+test('production bridge accepts a version alias only when schema hash and shape match', () => {
+  const result = selectBridgeSchemaProfile({
+    executable: 'C:\\Codex\\codex.exe',
+    cliVersion: '0.144.3',
+    observeSchema: () => ({
+      schemaHash: PROFILE_0144_2.schemaHash,
+      requestMethods: PROFILE_0144_2.requestMethods,
+      notificationMethods: PROFILE_0144_2.notificationMethods,
+      typeUnions: PROFILE_0144_2.typeUnions,
+    }),
+  });
+  assert.equal(result.compatible, true);
+  assert.equal(result.profile.id, 'app-server-v0144_2');
+  assert.equal(result.profile.cliVersions.includes('0.144.3'), false, 'version is only a hint');
 });

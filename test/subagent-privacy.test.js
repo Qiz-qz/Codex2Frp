@@ -14,28 +14,31 @@ function createPrivacy(options) {
   return createSubagentPrivacy(options);
 }
 
-test('uses only the sanitized task-name segment and exposes enabled lifecycle state', () => {
+test('online lifecycle DTO contains only safe subagent name and state', () => {
   const privacy = createPrivacy();
   const result = privacy.normalize(subagentActivity('started').payload);
 
   assert.deepEqual(result, {
     name: 'private-secret-agent-path',
-    status: 'enabled',
-    change: 'enabled',
-    aggregate: {
-      enabled: 1,
-      closed: 0,
-      failed: 0,
-      interrupted: 0,
-    },
+    state: 'running',
+  });
+});
+
+test('uses only the sanitized task-name segment and exposes running lifecycle state', () => {
+  const privacy = createPrivacy();
+  const result = privacy.normalize(subagentActivity('started').payload);
+
+  assert.deepEqual(result, {
+    name: 'private-secret-agent-path',
+    state: 'running',
   });
   assertNoSecretCanaries(assert, result);
 });
 
-test('tracks closed, failed, and interrupted states without exposing raw identity', () => {
+test('tracks completed, failed, and interrupted states without exposing raw identity', () => {
   const privacy = createPrivacy();
   privacy.normalize(subagentActivity('started').payload);
-  const closed = privacy.normalize(subagentActivity('closed').payload);
+  const completed = privacy.normalize(subagentActivity('closed').payload);
 
   const failedPayload = subagentActivity('failed', {
     agent_thread_id: `${RAW_AGENT_ID}-failed`,
@@ -48,37 +51,45 @@ test('tracks closed, failed, and interrupted states without exposing raw identit
     agent_path: '/root/private-interrupted',
   }).payload);
 
-  assert.equal(closed.name, 'private-secret-agent-path');
-  assert.equal(closed.status, 'closed');
+  assert.equal(completed.name, 'private-secret-agent-path');
+  assert.equal(completed.state, 'completed');
   assert.equal(failed.name, 'private-failed');
-  assert.equal(failed.status, 'failed');
+  assert.equal(failed.state, 'failed');
   assert.equal(interrupted.name, 'private-interrupted');
-  assert.equal(interrupted.status, 'interrupted');
-  assert.deepEqual(interrupted.aggregate, {
-    enabled: 0,
-    closed: 1,
-    failed: 1,
-    interrupted: 1,
-  });
-  assertNoSecretCanaries(assert, [closed, failed, interrupted]);
+  assert.equal(interrupted.state, 'interrupted');
+  assert.deepEqual(completed, { name: 'private-secret-agent-path', state: 'completed' });
+  assert.deepEqual(failed, { name: 'private-failed', state: 'failed' });
+  assert.deepEqual(interrupted, { name: 'private-interrupted', state: 'interrupted' });
+  assertNoSecretCanaries(assert, [completed, failed, interrupted]);
 });
 
-test('drops repeated interaction noise and unknown lifecycle kinds', () => {
+test('publishes every real interaction as a privacy-safe running update', () => {
   const privacy = createPrivacy();
   privacy.normalize(subagentActivity('started').payload);
 
-  assert.equal(privacy.normalize(subagentActivity('interacted').payload), null);
+  assert.deepEqual(privacy.normalize(subagentActivity('interacted').payload), {
+    name: 'private-secret-agent-path',
+    state: 'running',
+  });
+  assert.deepEqual(privacy.normalize(subagentActivity('interacted').payload), {
+    name: 'private-secret-agent-path',
+    state: 'running',
+  });
   assert.equal(privacy.normalize(subagentActivity('future-secret-kind').payload), null);
   assertNoSecretCanaries(assert, privacy.snapshot());
 });
 
-test('never turns interaction-only noise into a user-visible lifecycle transition', () => {
+test('interaction-only activity creates one safe running lifecycle without content', () => {
   const privacy = createPrivacy();
   const result = privacy.normalize(subagentActivity('interacted').payload);
 
-  assert.equal(result, null);
-  assert.deepEqual(privacy.snapshot(), {
-    agents: [],
-    aggregate: { enabled: 0, closed: 0, failed: 0, interrupted: 0 },
+  assert.deepEqual(result, {
+    name: 'private-secret-agent-path',
+    state: 'running',
   });
+  assert.deepEqual(privacy.snapshot(), {
+    agents: [{ name: 'private-secret-agent-path', status: 'running' }],
+    aggregate: { running: 1, completed: 0, failed: 0, interrupted: 0 },
+  });
+  assertNoSecretCanaries(assert, result);
 });
