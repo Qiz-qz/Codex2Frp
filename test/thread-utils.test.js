@@ -25,8 +25,8 @@ test('detects Codex subagent session metadata', () => {
 });
 
 test('classifies scratch dated Codex folders as conversation threads', () => {
-  const homeDir = 'C:\\Users\\admin';
-  const project = classifyThreadProject('C:\\Users\\admin\\Documents\\Codex\\2026-06-14\\scratch', { homeDir });
+  const homeDir = 'C:\\Users\\fixture-user';
+  const project = classifyThreadProject('C:\\Users\\fixture-user\\Documents\\Codex\\2026-06-14\\scratch', { homeDir });
   assert.deepEqual(project, {
     isProjectThread: false,
     projectKey: 'conversation',
@@ -36,12 +36,12 @@ test('classifies scratch dated Codex folders as conversation threads', () => {
 });
 
 test('classifies real project folders with stable names', () => {
-  const homeDir = 'C:\\Users\\admin';
-  const project = classifyThreadProject('E:\\HarmonyOS_develop\\projects\\codexphone', { homeDir });
+  const homeDir = 'C:\\Users\\fixture-user';
+  const project = classifyThreadProject('E:\\SampleWorkspace\\projects\\mobile-bridge', { homeDir });
   assert.equal(project.isProjectThread, true);
-  assert.equal(project.projectName, 'codexphone');
-  assert.equal(project.projectPath, 'E:\\HarmonyOS_develop\\projects\\codexphone');
-  assert.equal(displayPathName('E:\\HarmonyOS_develop\\projects\\codexphone', { homeDir }), 'codexphone');
+  assert.equal(project.projectName, 'mobile-bridge');
+  assert.equal(project.projectPath, 'E:\\SampleWorkspace\\projects\\mobile-bridge');
+  assert.equal(displayPathName('E:\\SampleWorkspace\\projects\\mobile-bridge', { homeDir }), 'mobile-bridge');
 });
 
 test('normalizes thread list limits high enough to include older projects', () => {

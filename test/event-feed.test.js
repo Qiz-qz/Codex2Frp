@@ -3,6 +3,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventFeed } = require('../lib/events/event-feed');
+const {
+  getPrivateAttachmentSource,
+  setPrivateAttachmentSource,
+} = require('../lib/events/private-attachment-source');
 
 function event(eventId, order, value = eventId) {
   return { eventId, order, type: 'test', value };
@@ -34,6 +38,60 @@ test('feed accepts late events without rewinding cursor and sorts snapshots by e
   assert.deepEqual(snapshot.events.map(item => item.cursor), [2, 1]);
 });
 
+test('feed clones preserve private attachment sources without serializing workstation paths', () => {
+  const filePath = 'E:\\ProtocolFixtures\\private-user-image.png';
+  const attachment = setPrivateAttachmentSource({ name: 'private-user-image.png', mime: 'image/png' }, filePath);
+  const feed = new EventFeed({ serverInstanceId: 'server-private-attachment' });
+  const accepted = feed.publish([{
+    eventId: 'private-attachment-event', order: 1, type: 'message', role: 'user', attachments: [attachment],
+  }]);
+  const snapshot = feed.snapshot();
+  const delta = feed.read({ serverInstanceId: 'server-private-attachment', snapshotVersion: 1, cursor: 0 });
+
+  assert.equal(getPrivateAttachmentSource(accepted[0].attachments[0]), filePath);
+  assert.equal(getPrivateAttachmentSource(snapshot.events[0].attachments[0]), filePath);
+  assert.equal(getPrivateAttachmentSource(delta.events[0].attachments[0]), filePath);
+  assert.equal(JSON.stringify([accepted, snapshot, delta]).includes('ProtocolFixtures'), false);
+});
+
+test('feed accepts a private-source supplement even when public attachment metadata is unchanged', () => {
+  const filePath = 'E:\\ProtocolFixtures\\late-private-source.png';
+  const feed = new EventFeed({ serverInstanceId: 'server-private-supplement' });
+  const publicEvent = {
+    eventId: 'private-source-supplement', order: 1, type: 'message', role: 'user',
+    attachments: [{ name: 'late-private-source.png', mime: 'image/png' }],
+  };
+  feed.publish([publicEvent]);
+  const supplemented = structuredClone(publicEvent);
+  setPrivateAttachmentSource(supplemented.attachments[0], filePath);
+
+  const accepted = feed.publish([supplemented]);
+  assert.equal(accepted.length, 1);
+  assert.equal(getPrivateAttachmentSource(feed.snapshot().events[0].attachments[0]), filePath);
+});
+
+test('equal-sequence events preserve first-observed order across upsert and rehydrate', () => {
+  const feed = new EventFeed({ serverInstanceId: 'server-equal-order' });
+  feed.publish([
+    { ...event('z-first', 7), sequence: 7, state: 'running' },
+    { ...event('a-second', 7), sequence: 7, state: 'running' },
+  ]);
+
+  assert.deepEqual(feed.snapshot().events.map(item => item.eventId), ['z-first', 'a-second']);
+  assert.deepEqual(feed.snapshot().events.map(item => item.sourceOrdinal), [1, 2]);
+
+  feed.publish([{ ...event('z-first', 7), sequence: 7, state: 'succeeded' }]);
+  assert.deepEqual(feed.snapshot().events.map(item => item.eventId), ['z-first', 'a-second']);
+  assert.deepEqual(feed.snapshot().events.map(item => item.sourceOrdinal), [1, 2]);
+
+  const rehydrated = feed.replaceSnapshot([
+    { ...event('z-first', 7), sequence: 7, state: 'succeeded' },
+    { ...event('a-second', 7), sequence: 7, state: 'running' },
+  ]);
+  assert.deepEqual(rehydrated.events.map(item => item.eventId), ['z-first', 'a-second']);
+  assert.deepEqual(rehydrated.events.map(item => item.sourceOrdinal), [1, 2]);
+});
+
 test('matching server and snapshot metadata returns only events after the client cursor', () => {
   const feed = new EventFeed({ serverInstanceId: 'server-a' });
   feed.publish([event('one', 1), event('two', 2), event('three', 3)]);
@@ -48,8 +106,8 @@ test('matching server and snapshot metadata returns only events after the client
     snapshotVersion: 1,
     cursor: 3,
     events: [
-      { ...event('two', 2), cursor: 2 },
-      { ...event('three', 3), cursor: 3 },
+      { ...event('two', 2), sourceOrdinal: 2, cursor: 2 },
+      { ...event('three', 3), sourceOrdinal: 3, cursor: 3 },
     ],
   });
 });
@@ -111,6 +169,28 @@ test('generic activities upsert state, count, and attachments under one stable e
   assert.equal(snapshot.events[0].state, 'succeeded');
   assert.equal(snapshot.events[0].count, 2);
   assert.deepEqual(snapshot.events[0].attachments.map(item => item.name), ['first.png', 'second.png']);
+});
+
+test('multi command lifecycle upsert replaces the outer detail array without appending stale children', () => {
+  const feed = new EventFeed({ serverInstanceId: 'server-multi-command' });
+  const running = {
+    eventId: 'outer-command', order: 1, type: 'summary', summaryKind: 'tool', toolKind: 'command',
+    state: 'running', count: 2, displayDetails: ['Get-Date', 'Get-Location'],
+  };
+  const completed = {
+    ...running, order: 2, state: 'succeeded', count: 3,
+    displayDetails: ['Get-Date', 'Get-ChildItem', 'Get-ChildItem'],
+  };
+
+  feed.publish([running]);
+  const accepted = feed.publish([completed]);
+  assert.equal(accepted.length, 1);
+  assert.deepEqual(accepted[0].displayDetails, completed.displayDetails);
+  const snapshot = feed.snapshot();
+  assert.equal(snapshot.events.length, 1);
+  assert.equal(snapshot.events[0].count, 3);
+  assert.deepEqual(snapshot.events[0].displayDetails, completed.displayDetails);
+  assert.equal(snapshot.events[0].sourceOrdinal, 1);
 });
 
 test('server instance or snapshot version mismatch forces a full snapshot', () => {

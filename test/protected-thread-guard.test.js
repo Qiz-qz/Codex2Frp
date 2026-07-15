@@ -8,7 +8,7 @@ const {
 } = require('../lib/control/protected-thread-guard');
 const { CommandCoordinator } = require('../lib/control/command-coordinator');
 
-const PROTECTED = '019f4840-00df-7ee0-88cb-e3dbcb1871dc';
+const PROTECTED = '8d21c8ef-1e1f-4ea5-9a5f-2b3c4d5e6f70';
 const TEST_THREAD = '11111111-2222-4333-8444-555555555555';
 const OTHER_THREAD = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 

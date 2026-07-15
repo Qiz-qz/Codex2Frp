@@ -45,8 +45,10 @@ test('only authenticated explicit mobile routes enter the focus transaction', ()
   assert.match(functionBody('resolveExplicitUiObservedThread'), /readCurrentCodexThreadSelection/);
   assert.match(body, /BufferedHttpResponse/);
   assert.ok(body.indexOf('isAuthorized(req)') < body.indexOf('readBody(req)'), 'authorization precedes body parsing');
-  assert.match(contextBody, /requireObservedTargetMatch:\s*!requestedThreadId/,
-    'implicit-current actions reject a desktop task change while waiting for the UI lock');
+  assert.match(contextBody, /requireObservedTargetMatch:\s*action !== 'control\.enable'\s*&& action !== 'thread\.openDesktop'/,
+    'ordinary composer mutations require an exact pre-state while desktop selection may transition A to B');
+  assert.doesNotMatch(contextBody, /requireObservedTargetMatch:\s*!requestedThreadId/,
+    'an explicit requested task must not bypass A/B target matching');
 });
 
 test('ordinary explicit UI transaction activates before resolving and guarding the observed task', () => {
@@ -65,7 +67,7 @@ test('only the composer plus-menu GET is classified as a read-only UI transactio
     transactionSource.indexOf('class ExplicitProcessControlTransaction'),
   );
   assert.match(contextBody, /pathname === '\/codex\/composer-plus-menu'[\s\S]*access\s*=\s*'readOnly'/);
-  assert.match(contextBody, /\r?\n\s*access,\r?\n/);
+  assert.match(contextBody, /\n\s*access,\n/);
   assert.match(transactionBody, /context\.access === 'readOnly'/);
   assert.match(transactionBody, /if \(!readOnly\)[\s\S]*readyGuardContext/);
   assert.doesNotMatch(contextBody, /composer-action[^}]+access\s*=\s*'readOnly'/s);
@@ -76,7 +78,6 @@ test('dispatch marks every legacy UI mutation as explicit and leaves reads/backg
   assert.match(body, /const pathname = new URL\(req\.url/);
   for (const route of [
     '/send',
-    '/codex/select',
     '/codex/new-thread',
     '/codex/thread-action',
     '/codex/composer-plus-menu',
@@ -89,6 +90,12 @@ test('dispatch marks every legacy UI mutation as explicit and leaves reads/backg
     const escaped = route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(body, new RegExp(`pathname === '${escaped}'[^\\n]+handleExplicitUiRequest`), `${route} uses an exact explicit UI route`);
   }
+  assert.match(body, /pathname === '\/codex\/select'[^\n]+handleSelectThread/,
+    'desktop selection delegates to the adapter-owned explicit transaction');
+  const selectBody = functionBody('handleSelectThread');
+  assert.match(selectBody, /desktopSelectionAdapter\.openDesktopThread/);
+  assert.match(selectBody, /ok \? 200 : result\.status === 'uncertain' \? 409 : 503/,
+    'a post-navigation exact UUID mismatch is an HTTP conflict');
   assert.doesNotMatch(body.match(/if \(req\.url\.startsWith\('\/codex\/v3\/'\)[\s\S]*?\n  }/)?.[0] || '', /runExplicitUiHttpAction/);
 });
 

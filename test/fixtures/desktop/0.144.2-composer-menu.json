@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "desktop": { "appVersion": "26.707.9981.0", "cliVersion": "0.144.2" },
+  "capture": {
+    "source": "installed-app-package-and-disposable-session",
+    "provenance": {
+      "installedPackage": "OpenAI.Codex_26.707.9981.0_x64",
+      "rendererEntry": "webview/index.html",
+      "subagentAction": "inferred-negative-contract-not-a-menu-observation",
+      "pluginAndFileRows": "static-classification-contract-not-live-menu-click"
+    },
+    "limitations": [
+      "packaged_chatgpt_ui_automation_was_prohibited_and_not_used",
+      "no_composer_menu_group_or_row_was_claimed_observed",
+      "collaboration_mode_was_not_observed_as_a_user_facing_menu_item"
+    ]
+  },
+  "rowsAreObservedMenuRows": false,
+  "rows": [
+    { "group": "Subagents", "action": "spawnAgent", "label": "fixture-helper", "expectedKind": "subagent", "evidence": "inferred-negative-contract" },
+    { "group": "Plugins", "pluginId": "fixture-plugin", "label": "Fixture plugin", "expectedKind": "plugin", "evidence": "static" },
+    { "group": "Files and chats", "action": "attachFile", "label": "Choose a file", "expectedKind": "filePicker", "evidence": "static" },
+    { "group": "Add", "action": "futureAction", "label": "Future row", "expectedKind": "unknown", "evidence": "negative-contract" }
+  ],
+  "collaboration": { "userFacingEntryObserved": false, "phoneControlAllowed": false }
+}

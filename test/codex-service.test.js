@@ -19,7 +19,7 @@ const {
 const PROFILE_FILE = path.join(__dirname, 'fixtures', 'app-server', 'v0144-profile.json');
 const CODEX_HOME = 'E:\\isolated\\codex-home';
 const THREAD_ID = '11111111-2222-4333-8444-555555555555';
-const PROTECTED_THREAD_ID = '019f4840-00df-7ee0-88cb-e3dbcb1871dc';
+const PROTECTED_THREAD_ID = '7c10b7de-0d0e-4d94-8f4e-1a2b3c4d5e6f';
 
 class FakeJsonlRpcClient {
   constructor(results = {}) {

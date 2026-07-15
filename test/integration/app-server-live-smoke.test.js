@@ -15,11 +15,71 @@ const {
 } = require('../../lib/app-server/discovery');
 const { AppServerProcessManager } = require('../../lib/app-server/process-manager');
 const { AppServerRuntime } = require('../../lib/app-server/runtime');
+const {
+  observeInstalledSchema,
+  selectBridgeSchemaProfile,
+} = require('../../lib/app-server/bridge-profile-selector');
 const { loadSchemaProfile } = require('../../lib/app-server/schema-profile');
+const { NEGOTIATED_REQUEST_METHODS } = require('../../lib/app-server/methods');
 const { createProtectedThreadGuard } = require('../../lib/control/protected-thread-guard');
+const { createDesktopSelectionAdapter } = require('../../lib/control/desktop-selection-adapter');
 const { classifyCodexServiceError } = require('../../lib/codex/codex-service');
 
 const live = process.env.CODEX2FRP_LIVE_APP_SERVER === '1';
+const PINNED_0144_2_SCHEMA_HASH = '2e30b98331bfd3951d812fe0a9c32f08caeef1e40749f77dc935baef8d33ba54';
+const protectedCurrentThreadId = String(process.env.CODEX2FRP_PROTECTED_THREAD_ID || '').trim().toLowerCase();
+const DISPOSABLE_SELECTION_THREAD_ID = '11111111-2222-4333-8444-555555555555';
+const liveSkip = live ? false : 'CODEX2FRP_LIVE_APP_SERVER=1 is required for isolated app-server checks';
+const liveProtectedSkip = !live
+  ? liveSkip
+  : (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(protectedCurrentThreadId)
+    ? 'CODEX2FRP_PROTECTED_THREAD_ID must explicitly name the protected desktop task for live controls'
+    : false);
+const liveAuthSource = String(process.env.CODEX2FRP_LIVE_AUTH_SOURCE || '').trim();
+const liveWriteSkip = liveProtectedSkip
+  ? liveProtectedSkip
+  : (!liveAuthSource || !fs.existsSync(path.resolve(liveAuthSource))
+    ? 'CODEX2FRP_LIVE_AUTH_SOURCE must name a readable auth file for isolated turn checks'
+    : false);
+
+function assertIsolatedCodexHome(codexHome) {
+  const resolved = path.resolve(codexHome);
+  const tempPrefix = path.resolve(os.tmpdir(), 'codex2frp-live-');
+  assert.equal(resolved.startsWith(tempPrefix), true, 'CODEX_HOME must be under the dedicated temporary prefix');
+  const ambient = String(process.env.CODEX_HOME || '').trim();
+  if (ambient) assert.notEqual(resolved.toLowerCase(), path.resolve(ambient).toLowerCase());
+  return resolved;
+}
+
+test('desktop selection integration fails closed without exact disposable evidence', async () => {
+  if (protectedCurrentThreadId) assert.notEqual(DISPOSABLE_SELECTION_THREAD_ID, protectedCurrentThreadId);
+  const unavailable = createDesktopSelectionAdapter();
+  assert.deepEqual(await unavailable.openDesktopThread(DISPOSABLE_SELECTION_THREAD_ID), {
+    status: 'unavailable',
+    requestedThreadId: DISPOSABLE_SELECTION_THREAD_ID,
+    reason: 'desktop_navigation_unavailable',
+  });
+
+  let now = 1_752_105_600_000;
+  const mismatch = createDesktopSelectionAdapter({
+    transaction: { run: async (_context, operation) => operation({}) },
+    createIntent: () => ({ id: 'disposable-selection-intent' }),
+    createSourceToken: () => 'disposable-selection-token',
+    navigate: async () => {},
+    observeSource: async () => ({
+      route: 'codex://threads/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      observedAt: new Date(1_752_105_600_000).toISOString(),
+      confidence: 'exact',
+    }),
+    now: () => ++now,
+    sleep: async () => {},
+    confirmationTimeoutMs: 1,
+  });
+  const result = await mismatch.openDesktopThread(DISPOSABLE_SELECTION_THREAD_ID);
+  assert.equal(result.status, 'uncertain');
+  assert.equal(result.reason, 'desktop_selection_mismatch');
+  assert.equal(result.requestedThreadId, DISPOSABLE_SELECTION_THREAD_ID);
+});
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -110,7 +170,7 @@ function removeWritableTree(root) {
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   } catch (error) {
     const resolved = path.resolve(root);
-    const safePrefix = path.resolve(os.tmpdir(), 'codex2frp-live-write-');
+    const safePrefix = path.resolve(os.tmpdir(), 'codex2frp-live-');
     if (process.platform !== 'win32' || !resolved.startsWith(safePrefix)) throw error;
     for (let attempt = 0; attempt < 8 && fs.existsSync(resolved); attempt += 1) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
@@ -141,6 +201,55 @@ function treeContains(root, needle) {
   return false;
 }
 
+function assertCatalogRowIdentity(rows, fields, label) {
+  assert.equal(rows.every(row => fields.some(field => typeof row[field] === 'string' && row[field].trim())), true,
+    `${label} rows expose a stable string identity`);
+}
+
+function assertPermissionProfileCatalog(catalog) {
+  assert.equal(catalog !== null && typeof catalog === 'object' && !Array.isArray(catalog), true,
+    'permissionProfile/list returns an object container');
+  assert.equal(Array.isArray(catalog.data), true, 'permissionProfile/list exposes typed data rows');
+  assert.equal(catalog.data.length > 0, true, 'permissionProfile/list returns selectable profiles');
+  assert.equal(catalog.data.every(row => (
+    row !== null
+    && typeof row === 'object'
+    && !Array.isArray(row)
+    && typeof row.id === 'string'
+    && row.id.trim().length > 0
+    && typeof row.allowed === 'boolean'
+  )), true, 'permissionProfile/list rows match PermissionProfileSummary');
+  assertCatalogRowIdentity(catalog.data, ['id'], 'permissionProfile/list');
+}
+
+function assertPluginCatalog(catalog) {
+  assert.equal(catalog !== null && typeof catalog === 'object' && !Array.isArray(catalog), true,
+    'plugin/list returns an object container');
+  assert.equal(Array.isArray(catalog.marketplaces), true, 'plugin/list exposes marketplace rows');
+  assert.equal(catalog.marketplaces.every(marketplace => (
+    marketplace !== null
+    && typeof marketplace === 'object'
+    && !Array.isArray(marketplace)
+    && typeof marketplace.name === 'string'
+    && marketplace.name.trim().length > 0
+    && Array.isArray(marketplace.plugins)
+  )), true, 'plugin/list marketplace rows match PluginMarketplaceEntry');
+  assertCatalogRowIdentity(catalog.marketplaces, ['name'], 'plugin/list marketplaces');
+  const pluginRows = catalog.marketplaces.flatMap(marketplace => marketplace.plugins);
+  assert.equal(pluginRows.every(plugin => (
+    plugin !== null
+    && typeof plugin === 'object'
+    && !Array.isArray(plugin)
+    && typeof plugin.id === 'string'
+    && plugin.id.trim().length > 0
+    && typeof plugin.name === 'string'
+    && plugin.name.trim().length > 0
+    && typeof plugin.enabled === 'boolean'
+    && typeof plugin.installed === 'boolean'
+  )), true, 'plugin/list rows match PluginSummary');
+  assertCatalogRowIdentity(pluginRows, ['id', 'name'], 'plugin/list');
+}
+
 async function waitForCondition(condition, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -150,46 +259,160 @@ async function waitForCondition(condition, timeoutMs = 5000) {
   return condition();
 }
 
-test('current Codex app-server initializes and lists only an isolated CODEX_HOME', { skip: !live }, async () => {
+test('Codex 0.144.2 negotiates catalogs and confirms disposable start/read in isolated CODEX_HOME', { skip: liveProtectedSkip }, async () => {
   const executable = discoverCodexExecutable();
   const cliVersion = detectCodexCliVersion(executable);
   const profileFile = profileFileForCliVersion(cliVersion);
   assert.ok(executable, 'a runnable bundled Codex CLI was discovered');
   assert.ok(cliVersion, 'the current CLI version was detected');
+  assert.equal(cliVersion, '0.144.2', 'the live parity gate targets the installed Codex 0.144.2 baseline');
   assert.ok(profileFile, `a schema profile exists for ${cliVersion}`);
 
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-live-app-server-'));
+  const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-live-gate-'));
+  const codexHome = path.join(isolatedRoot, 'codex-home');
+  const workspace = path.join(isolatedRoot, 'workspace');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(workspace, { recursive: true });
+  assertIsolatedCodexHome(codexHome);
+  const schemaProfile = loadSchemaProfile(profileFile);
+  assert.equal(schemaProfile.id, 'app-server-v0144_2');
+  assert.equal(schemaProfile.schemaHash, PINNED_0144_2_SCHEMA_HASH);
+  let schemaObservation;
+  try {
+    schemaObservation = observeInstalledSchema(executable, {
+      runtimeDirectory: path.join(isolatedRoot, 'schema-observation'),
+      timeoutMs: 30000,
+    });
+  } catch (error) {
+    removeWritableTree(isolatedRoot);
+    throw error;
+  }
+  assert.equal(
+    schemaObservation.schemaHash,
+    PINNED_0144_2_SCHEMA_HASH,
+    'the freshly generated normalized installed schema matches the pinned profile',
+  );
+  const negotiation = selectBridgeSchemaProfile({
+    executable,
+    cliVersion,
+    observeSchema: () => schemaObservation,
+  });
+  assert.equal(negotiation.compatible, true, negotiation.reason);
+  assert.equal(negotiation.profile.id, 'app-server-v0144_2');
+  for (const method of schemaProfile.requiredRequestMethods) {
+    assert.equal(schemaObservation.requestMethods.includes(method), true, `missing request method ${method}`);
+  }
+  for (const method of schemaProfile.requiredNotificationMethods) {
+    assert.equal(schemaObservation.notificationMethods.includes(method), true, `missing notification method ${method}`);
+  }
   const manager = new AppServerProcessManager({
     command: executable,
     requestTimeoutMs: 15000,
   });
   const runtime = new AppServerRuntime({
     processManager: manager,
-    schemaProfile: loadSchemaProfile(profileFile),
+    schemaProfile,
     codexHome,
-    protectedThreadGuard: createProtectedThreadGuard(),
+    protectedThreadGuard: createProtectedThreadGuard({ protectedThreadIds: [protectedCurrentThreadId] }),
     initializeParams: {
       clientInfo: { name: 'codex2frp-live-smoke', title: 'Codex2Frp live smoke', version: 'test' },
       capabilities: { experimentalApi: true },
     },
     backendVersion: 'test',
     cliVersion,
+    confirmedNativeControls: true,
   });
 
   try {
-    const result = await runtime.withService(service => service.listThreads({ limit: 5 }));
-    assert.ok(result && typeof result === 'object', 'thread/list returned an object');
-    const rows = Array.isArray(result.data) ? result.data : (Array.isArray(result.threads) ? result.threads : []);
-    assert.deepEqual(rows, [], 'the isolated CODEX_HOME contains no user tasks');
+    await runtime.withService(async service => {
+      const result = await service.listThreads({ limit: 5 });
+      const rows = Array.isArray(result.data) ? result.data : (Array.isArray(result.threads) ? result.threads : []);
+      assert.deepEqual(rows, [], 'the isolated CODEX_HOME contains no user tasks');
+
+      const catalog = await service.listModels({ limit: 100, includeHidden: false });
+      const models = Array.isArray(catalog.data) ? catalog.data : (Array.isArray(catalog.models) ? catalog.models : []);
+      assert.ok(models.length > 0, 'model/list returns the current installed catalog');
+      assert.equal(models.every(model => String(model.id || model.model || model.slug || '').trim()), true);
+      const efforts = models.flatMap(model => [
+        ...(Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : []),
+        ...(Array.isArray(model.supported_reasoning_efforts) ? model.supported_reasoning_efforts : []),
+        ...(Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : []),
+      ]);
+      assert.ok(efforts.length > 0, 'the catalog exposes model-supported reasoning efforts');
+
+      const created = await service.startThread({
+        cwd: workspace,
+        ephemeral: false,
+        approvalPolicy: 'never',
+        sandbox: 'read-only',
+        sessionStartSource: 'startup',
+      });
+      assert.equal(created.status, 'confirmed', JSON.stringify(created));
+      assert.match(created.observation.threadId, /^[a-f0-9-]{32,}$/i);
+      const threadId = created.observation.threadId;
+      assert.notEqual(threadId, protectedCurrentThreadId, 'live controls never target the explicitly protected current task');
+      const readback = await service.readThread({ threadId, includeTurns: false });
+      assert.equal(String(readback.thread && readback.thread.id || readback.id || ''), threadId,
+        'disposable thread is authoritatively readable');
+
+      const model = models[0];
+      const modelId = String(model.id || model.model || model.slug || '');
+      const effortRecord = efforts.find(value => value && typeof value === 'object');
+      const effort = typeof efforts[0] === 'string' ? efforts[0]
+        : String(effortRecord && (effortRecord.effort || effortRecord.value || effortRecord.id) || '');
+      const settings = await service.updateThreadSettings({
+        threadId,
+        model: modelId,
+        ...(effort ? { effort } : {}),
+      });
+      assert.deepEqual({
+        status: settings.status,
+        operation: settings.operation,
+        source: settings.observation && settings.observation.source,
+        readbackSupported: settings.observation && settings.observation.readbackSupported,
+      }, {
+        status: 'confirmed',
+        operation: 'thread.settings',
+        source: 'confirmedRequest',
+        readbackSupported: false,
+      });
+
+      const permissions = await service.rpcClient.request(NEGOTIATED_REQUEST_METHODS.PERMISSION_PROFILE_LIST, {});
+      assertPermissionProfileCatalog(permissions);
+      const plugins = await service.rpcClient.request(NEGOTIATED_REQUEST_METHODS.PLUGIN_LIST, {});
+      assertPluginCatalog(plugins);
+
+      const operations = runtime.getMeta().capabilities.operations;
+      for (const operation of ['permissionProfile.list', 'plugin.list']) {
+        assert.deepEqual({
+          mode: operations[operation].mode,
+          available: operations[operation].available,
+          ready: operations[operation].ready,
+          confirmed: operations[operation].confirmed,
+          readbackSupported: operations[operation].readbackSupported,
+          source: operations[operation].source,
+          reason: operations[operation].reason,
+        }, {
+          mode: 'rpc',
+          available: true,
+          ready: true,
+          confirmed: false,
+          readbackSupported: true,
+          source: 'appServer',
+          reason: null,
+        }, `${operation} capability metadata is truthful and ready`);
+      }
+    });
     assert.equal(runtime.getMeta().appServer.state, 'ready');
+    assert.equal(runtime.getMeta().protocol.profile, 'app-server-v0144_2');
   } finally {
     runtime.stop('SIGTERM');
-    await new Promise(resolve => setTimeout(resolve, 250));
-    fs.rmSync(codexHome, { recursive: true, force: true });
+    await waitForManagerExit(manager);
+    removeWritableTree(isolatedRoot);
   }
 });
 
-test('current Codex app-server mutates only a disposable isolated task', { skip: !live }, async () => {
+test('current Codex app-server mutates only a disposable isolated task', { skip: liveWriteSkip }, async () => {
   const executable = discoverCodexExecutable();
   const cliVersion = detectCodexCliVersion(executable);
   const profileFile = profileFileForCliVersion(cliVersion);
@@ -200,7 +423,7 @@ test('current Codex app-server mutates only a disposable isolated task', { skip:
   const workspace = path.join(isolatedRoot, 'workspace');
   fs.mkdirSync(codexHome, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
-  const liveAuthSource = String(process.env.CODEX2FRP_LIVE_AUTH_SOURCE || '').trim();
+  assertIsolatedCodexHome(codexHome);
   if (liveAuthSource) {
     const resolvedAuthSource = path.resolve(liveAuthSource);
     assert.equal(fs.statSync(resolvedAuthSource).isFile(), true, 'live auth source is a file');
@@ -212,7 +435,7 @@ test('current Codex app-server mutates only a disposable isolated task', { skip:
     processManager: manager,
     schemaProfile: loadSchemaProfile(profileFile),
     codexHome,
-    protectedThreadGuard: createProtectedThreadGuard(),
+    protectedThreadGuard: createProtectedThreadGuard({ protectedThreadIds: [protectedCurrentThreadId] }),
     initializeParams: {
       clientInfo: { name: 'codex2frp-live-write', title: 'Codex2Frp isolated write', version: 'test' },
       capabilities: { experimentalApi: true },
@@ -292,12 +515,13 @@ test('current Codex app-server mutates only a disposable isolated task', { skip:
   }
 });
 
-test('authenticated v3 HTTP surface stays lazy and reads only an isolated CODEX_HOME', { skip: !live }, async (t) => {
+test('authenticated v3 HTTP surface stays lazy and reads only an isolated CODEX_HOME', { skip: liveSkip }, async (t) => {
   const repoRoot = path.resolve(__dirname, '..', '..');
   const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-live-http-'));
   const codexHome = path.join(isolatedRoot, 'codex-home');
   const stateDir = path.join(isolatedRoot, 'state');
   fs.mkdirSync(codexHome, { recursive: true });
+  assertIsolatedCodexHome(codexHome);
   const port = await freePort();
   const token = 'isolated-live-smoke-token';
   const child = spawn(process.execPath, ['server.js'], {
@@ -308,7 +532,7 @@ test('authenticated v3 HTTP surface stays lazy and reads only an isolated CODEX_
       PORT: String(port),
       CODEX_HOME: codexHome,
       CODEX2FRP_STATE_DIR: stateDir,
-      CODEX2FRP_PROTECTED_THREAD_IDS: '11111111-2222-4333-8444-555555555555',
+      CODEX2FRP_PROTECTED_THREAD_IDS: protectedCurrentThreadId,
       MOBILE_TYPER_TOKEN: token,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -346,7 +570,7 @@ test('authenticated v3 HTTP surface stays lazy and reads only an isolated CODEX_
   assert.equal(metaAfter.body.appServer.state, 'ready');
 });
 
-test('authenticated v3 HTTP creates, queues, and immediately starts an isolated first turn', { skip: !live }, async (t) => {
+test('authenticated v3 HTTP creates, queues, and immediately starts an isolated first turn', { skip: liveWriteSkip }, async (t) => {
   const repoRoot = path.resolve(__dirname, '..', '..');
   const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-live-http-write-'));
   const codexHome = path.join(isolatedRoot, 'codex-home');
@@ -354,6 +578,7 @@ test('authenticated v3 HTTP creates, queues, and immediately starts an isolated 
   const stateDir = path.join(isolatedRoot, 'state');
   fs.mkdirSync(codexHome, { recursive: true });
   fs.mkdirSync(workspace, { recursive: true });
+  assertIsolatedCodexHome(codexHome);
   const authSource = path.resolve(String(process.env.CODEX2FRP_LIVE_AUTH_SOURCE || ''));
   assert.equal(fs.statSync(authSource).isFile(), true, 'live auth source is a file');
   fs.copyFileSync(authSource, path.join(codexHome, 'auth.json'));
@@ -368,6 +593,7 @@ test('authenticated v3 HTTP creates, queues, and immediately starts an isolated 
       CODEX_HOME: codexHome,
       CODEX2FRP_STATE_DIR: stateDir,
       CODEX2FRP_APP_SERVER_REQUEST_TIMEOUT_MS: '10000',
+      CODEX2FRP_PROTECTED_THREAD_IDS: protectedCurrentThreadId,
       MOBILE_TYPER_TOKEN: token,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -388,8 +614,10 @@ test('authenticated v3 HTTP creates, queues, and immediately starts an isolated 
   });
   assert.equal(created.statusCode, 201, stderr);
   const thread = created.body && created.body.thread || created.body;
-  const threadId = String(thread && (thread.id || thread.threadId) || '');
+  const threadId = String(thread && (thread.id || thread.threadId ||
+    (thread.observation && thread.observation.threadId)) || '');
   assert.ok(threadId, 'HTTP thread/start returns an id');
+  assert.notEqual(threadId, protectedCurrentThreadId);
 
   const queued = await requestJson(port, `/codex/v3/threads/${threadId}/queue`, token, {
     method: 'POST',

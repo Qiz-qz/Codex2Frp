@@ -62,6 +62,7 @@ $collaborationRows = if ($collaboration.data) { @($collaboration.data) } elseif 
 $queueRows = if ($queue -and $queue.data) { @($queue.data) } elseif ($queue -and $queue.items) { @($queue.items) } else { @() }
 
 [ordered]@{
+  readOnly = $true
   ok = [bool]$health.ok
   backendVersion = [string]$meta.versions.backend
   apiVersion = [int]$meta.apiVersion

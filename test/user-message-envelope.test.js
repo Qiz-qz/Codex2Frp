@@ -19,6 +19,19 @@ test('new file wrapper exposes only request text and safe basenames', () => {
   assert.equal(JSON.stringify(result).includes('C:/private'), false);
 });
 
+test('file wrapper preserves two different sources that share one safe basename', () => {
+  const result = parseUserMessageEnvelope([
+    '# Files mentioned by the user:',
+    '## same.png: E:/ProtocolFixtures/first/same.png',
+    '## same.png: E:/ProtocolFixtures/second/same.png',
+    '## My request for Codex:',
+    '比较两张图片',
+  ].join('\n'));
+
+  assert.deepEqual(result.attachmentNames, ['same.png', 'same.png']);
+  assert.equal(JSON.stringify(result).includes('ProtocolFixtures'), false);
+});
+
 test('incomplete file wrapper fails closed without exposing a path', () => {
   const result = parseUserMessageEnvelope('# Files mentioned by the user:\n## x.txt: C:/secret/x.txt');
   assert.deepEqual(result, { text: '', attachmentNames: ['x.txt'], recognized: true, malformed: true });

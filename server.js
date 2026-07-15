@@ -32,17 +32,24 @@ const {
 const modelOptionUtils = require('./lib/model-options');
 const { isAuthorizedRequest } = require('./lib/security/auth');
 const { selectCodexCdpTarget } = require('./lib/windows/cdp-target');
+const { resolveNextTurnSettings } = require('./lib/windows/composer-next-turn-settings');
 const { V3ApiRouter } = require('./lib/api/v3-router');
 const {
   detectCodexCliVersion,
   discoverCodexExecutable,
-  profileFileForCliVersion,
 } = require('./lib/app-server/discovery');
+const { selectBridgeSchemaProfile } = require('./lib/app-server/bridge-profile-selector');
 const { AppServerProcessManager } = require('./lib/app-server/process-manager');
 const { AppServerRuntime } = require('./lib/app-server/runtime');
 const { PendingRequestStore } = require('./lib/app-server/pending-request-store');
-const { loadSchemaProfile } = require('./lib/app-server/schema-profile');
 const { CommandCoordinator } = require('./lib/control/command-coordinator');
+const { classifyMenuItem, isExecutableMenuItem } = require('./lib/control/composer-menu-classifier');
+const {
+  consumeDesktopSelectionForSync,
+  createDesktopSelectionAdapter,
+  normalizeVerifiedDesktopSelection,
+  verifiedSelectionExpression,
+} = require('./lib/control/desktop-selection-adapter');
 const {
   ThreadProtectionRegistry,
   createDynamicProtectedThreadGuard,
@@ -59,8 +66,18 @@ const { createProductionQueueStore } = require('./lib/queue/queue-store');
 const { TurnInputQueue } = require('./lib/queue/turn-input-queue');
 const { redactDiagnosticString } = require('./lib/diagnostics/diagnostic-report');
 const { parseUserMessageEnvelope } = require('./lib/events/user-message-envelope');
-const { createSessionNormalizer } = require('./lib/events/session-normalizer');
+const { assertExactThreadBeforeSideEffect } = require('./lib/control/thread-side-effect-guard');
+const {
+  mergeAdjacentUserHistoryMessage: mergeHistoryUserPair,
+  mergeUserHistoryAttachments,
+} = require('./lib/events/history-user-pair');
+const { EventReconciler } = require('./lib/events/reconciler');
+const { TurnDiffStore } = require('./lib/events/turn-diff-store');
 const { buildTurnViews } = require('./lib/events/turn-view-builder');
+const {
+  getPrivateAttachmentSource,
+  setPrivateAttachmentSource,
+} = require('./lib/events/private-attachment-source');
 const {
   ProductionEventRuntime,
   createSessionResolver,
@@ -299,10 +316,15 @@ function handleV3ServerRequest(store, request = {}) {
 function createV3Bridge() {
   const executable = discoverCodexExecutable();
   const cliVersion = detectCodexCliVersion(executable);
-  const profileFile = profileFileForCliVersion(cliVersion);
+  const profileSelection = selectBridgeSchemaProfile({
+    executable,
+    cliVersion,
+    runtimeDirectory: path.join(__dirname, '.runtime'),
+  });
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   const eventRuntime = new ProductionEventRuntime({
     resolveSession: createSessionResolver({ sessionsDir: path.join(codexHome, 'sessions') }),
+    turnDiffStore: new TurnDiffStore({ file: path.join(__dirname, '.runtime', 'turn-diffs.json') }),
   });
   const allowedThreadIds = splitConfiguredIds(process.env.CODEX2FRP_ALLOWED_THREAD_IDS);
   const guard = createDynamicProtectedThreadGuard({
@@ -326,10 +348,11 @@ function createV3Bridge() {
     attachmentStore.cleanupExpired();
   } catch {}
 
-  if (!executable || !cliVersion || !profileFile) {
+  if (!executable || !profileSelection.compatible) {
     const runtime = unavailableV3Runtime('No compatible Codex app-server profile is available.', {
       cliVersion,
       executableFound: Boolean(executable),
+      reason: profileSelection.reason,
     });
     return {
       runtime,
@@ -345,13 +368,15 @@ function createV3Bridge() {
   }
 
   try {
-    const profile = loadSchemaProfile(profileFile);
+    const profile = profileSelection.profile;
     const runtime = new AppServerRuntime({
       processManager: new AppServerProcessManager({
         command: executable,
         requestTimeoutMs: CODEX_APP_SERVER_REQUEST_TIMEOUT_MS,
       }),
       schemaProfile: profile,
+      supportedMethods: profile.requestMethods,
+      confirmedNativeControls: true,
       codexHome,
       commandCoordinator,
       protectedThreadGuard: guard,
@@ -418,6 +443,19 @@ const uiActionTransaction = new UiActionTransaction({
   timeoutMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_MS || 15000),
   timeoutGraceMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_GRACE_MS || 2000),
   resolveObservedThread: resolveExplicitUiObservedThread,
+});
+const desktopSelectionAdapter = createDesktopSelectionAdapter({
+  observeSource: readCurrentCodexThreadSelectionEvidenceViaCdp,
+  navigate: async ({ threadId }) => {
+    const result = await activateCodexThreadViaExistingCdp(threadId);
+    if (result && result.ok === true) return result;
+    const error = new Error('The requested desktop task is not available through the verified Codex action route.');
+    error.code = String(result && result.code || 'DESKTOP_THREAD_NAVIGATION_UNAVAILABLE');
+    error.statusCode = 409;
+    throw error;
+  },
+  transaction: uiActionTransaction,
+  createIntent: createExplicitUiIntent,
 });
 const explicitProcessControlTransaction = new ExplicitProcessControlTransaction({
   adapter: explicitWin32FocusAdapter,
@@ -1178,38 +1216,6 @@ function normalizeCodexThreadId(value) {
   return match ? match[1] : '';
 }
 
-function normalizeCurrentThreadPreviewText(value) {
-  return String(value || '')
-    .replace(/\s+/g, ' ')
-    .replace(/^What should we get done\?\s*/i, '')
-    .trim();
-}
-
-function currentThreadPreviewCandidates(value) {
-  const text = normalizeCurrentThreadPreviewText(value);
-  if (text.length < 48) return [];
-  const candidates = [];
-  candidates.push(text.slice(0, Math.min(140, text.length)));
-  if (text.length > 220) candidates.push(text.slice(80, Math.min(240, text.length)));
-  return candidates
-    .map(item => item.trim())
-    .filter(item => item.length >= 48);
-}
-
-function findCodexThreadIdByVisibleText(value) {
-  const candidates = currentThreadPreviewCandidates(value);
-  if (candidates.length === 0) return '';
-  for (const file of listCodexSessionFiles()) {
-    const match = path.basename(file).match(/([a-f0-9]{8}-[a-f0-9-]{27,})\.jsonl$/i);
-    if (!match) continue;
-    try {
-      const raw = fs.readFileSync(file, 'utf8').replace(/\s+/g, ' ');
-      if (candidates.some(candidate => raw.includes(candidate))) return match[1];
-    } catch {}
-  }
-  return '';
-}
-
 function codexThreadDeepLink(threadId) {
   if (!isCodexThreadId(threadId)) return null;
   // Codex desktop's own “Copy app link” action uses codex://threads/<id>.
@@ -1527,63 +1533,23 @@ function shouldIncludeCodexSessionMeta(meta, options = {}) {
 }
 
 function normalizeCurrentThreadSelection(value) {
-  if (!value || typeof value !== 'object') return null;
-  const preview = typeof value.preview === 'string' ? value.preview : '';
-  const threadId = normalizeCodexThreadId(value.threadId) || findCodexThreadIdByVisibleText(preview);
-  if (!threadId) return null;
-  return {
-    threadId,
-    title: typeof value.title === 'string' && value.title.trim()
-      ? value.title.trim()
-      : normalizeCurrentThreadPreviewText(preview).slice(0, 120),
-    source: typeof value.source === 'string' ? value.source : 'codex-cdp',
-    observedAt: new Date().toISOString(),
-  };
+  return normalizeVerifiedDesktopSelection(value);
 }
 
-async function readCurrentCodexThreadSelectionViaCdp() {
+async function readCurrentCodexThreadSelectionEvidenceViaCdp() {
   const target = await findCodexCdpTarget({ autoOpen: false });
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
   try {
     await client.call('Runtime.enable').catch(() => {});
     await client.call('Page.enable').catch(() => {});
-    const selection = await cdpEvaluate(client, `(() => {
-      const threadIdPattern = /^(?:local:)?[a-f0-9]{8}-[a-f0-9-]{27,}$/i;
-      const visible = el => {
-        const rect = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return rect.width > 0 && rect.height > 0 &&
-          rect.bottom >= 0 && rect.y <= innerHeight &&
-          rect.right >= 0 && rect.x <= innerWidth &&
-          style.display !== 'none' && style.visibility !== 'hidden';
-      };
-      const cleanText = value => String(value || '').replace(/\\s+/g, ' ').trim();
-      const rows = [...document.querySelectorAll('[data-app-action-sidebar-thread-id]')]
-        .filter(visible)
-        .map(el => ({
-          threadId: el.getAttribute('data-app-action-sidebar-thread-id') || '',
-          active: el.getAttribute('data-app-action-sidebar-thread-active') === 'true' ||
-            el.getAttribute('aria-current') === 'true' ||
-            el.matches('[aria-current="true"], [data-state="active"], .active, .is-active'),
-          text: cleanText(el.textContent),
-        }))
-        .filter(row => threadIdPattern.test(row.threadId));
-      const active = rows.find(row => row.active);
-      if (active) return { threadId: active.threadId, title: active.text, source: 'codex-cdp-sidebar' };
-      const urlMatch = String(location.href || '').match(/([a-f0-9]{8}-[a-f0-9-]{27,})/i);
-      if (urlMatch && threadIdPattern.test(urlMatch[1])) {
-        return { threadId: urlMatch[1], title: document.title || '', source: 'codex-cdp-location' };
-      }
-      const mainText = cleanText((document.querySelector('main') || document.body || {}).innerText || '');
-      if (mainText.length > 0) {
-        return { preview: mainText.slice(0, 2200), source: 'codex-cdp-main' };
-      }
-      return null;
-    })()`);
-    return normalizeCurrentThreadSelection(selection);
+    return await cdpEvaluate(client, verifiedSelectionExpression());
   } finally {
     client.close();
   }
+}
+
+async function readCurrentCodexThreadSelectionViaCdp() {
+  return normalizeCurrentThreadSelection(await readCurrentCodexThreadSelectionEvidenceViaCdp());
 }
 
 async function readCurrentCodexThreadSelection(options = {}) {
@@ -1686,14 +1652,18 @@ async function handleThreads(req, res) {
   if (forceRefresh) invalidateCodexThreadListCache();
   const limit = normalizeThreadListLimit(url.searchParams.get('limit'));
   const includeSubagents = url.searchParams.get('includeSubagents') === '1';
-  const currentThread = await readCurrentCodexThreadSelection({ force: forceRefresh });
+  const sync = await consumeDesktopSelectionForSync(desktopSelectionAdapter);
+  const currentThread = sync.selection;
   const selectedThreadId = currentThread && currentThread.threadId ? currentThread.threadId : '';
   const threads = listCodexThreads(limit, { includeSubagents, includeThreadId: selectedThreadId });
   return json(res, 200, {
     ok: true,
-    selectedThreadId,
-    currentThreadId: selectedThreadId,
-    currentThread,
+    desktopSelectionSuppressed: sync.suppressed,
+    ...(!sync.suppressed ? {
+      selectedThreadId,
+      currentThreadId: selectedThreadId,
+      currentThread,
+    } : {}),
     threads,
   });
 }
@@ -1845,25 +1815,29 @@ function countCodexHistoryMessages(lines, maxNeeded = MAX_HISTORY_MESSAGES) {
     }
     const userHistoryMessage = extractUserHistoryMessage(item);
     if (userHistoryMessage) {
-      if (
-        (userHistoryMessage.text || userHistoryMessage.attachments.length) &&
-        !isDuplicateAdjacentUserHistoryMessage(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '')
-      ) {
+      const merged = mergeHistoryUserPair(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '');
+      const duplicate = isDuplicateAdjacentUserHistoryMessage(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '');
+      if ((userHistoryMessage.text || userHistoryMessage.attachments.length) && !duplicate) {
         count += 1;
       }
-      lastUserHistoryMessage = { ...userHistoryMessage, timestamp: item.timestamp || '' };
+      lastUserHistoryMessage = merged.message;
     } else if (item.type === 'response_item' && payload.type === 'message' && payload.role === 'assistant' && payload.phase === 'final_answer') {
+      lastUserHistoryMessage = null;
       const text = normalizeHistoryText(extractMessageText(payload.content));
       if (text) {
         count += 1;
         if (currentTurn) currentTurn.hasAssistant = true;
       }
     } else if (item.type === 'event_msg' && payload.type === 'task_complete') {
+      lastUserHistoryMessage = null;
       if (currentTurn && !currentTurn.hasAssistant) count += 1;
       currentTurn = null;
     } else if (item.type === 'event_msg' && isTerminalFailurePayload(payload)) {
+      lastUserHistoryMessage = null;
       if (currentTurn && !currentTurn.hasAssistant) count += 1;
       currentTurn = null;
+    } else {
+      lastUserHistoryMessage = null;
     }
     if (count >= need) return count;
   }
@@ -1904,32 +1878,33 @@ function extractUserAttachments(payload) {
 function extractUserHistoryMessage(item) {
   const payload = item?.payload || {};
   if (item?.type === 'event_msg' && payload.type === 'user_message') {
-    const text = cleanUserHistoryText(payload.message);
-    const attachments = extractUserAttachments(payload);
-    return (text || attachments.length) ? { text, attachments } : null;
+    const envelope = parseUserMessageEnvelope(payload.message);
+    const text = cleanUserHistoryText(envelope.text);
+    const attachments = mergeUserHistoryAttachments(envelope.attachmentNames, extractUserAttachments(payload));
+    return (text || attachments.length) ? {
+      text, attachments, representation: 'event_msg',
+      recordId: String(payload.client_id || payload.id || ''),
+    } : null;
   }
   if (item?.type !== 'response_item' || payload.role !== 'user') return null;
   let rawText = '';
   if (payload.type === 'message' && payload.role === 'user') rawText = extractMessageText(payload.content);
   else rawText = payload.message || payload.text || extractMessageText(payload.content);
   const objectiveText = extractGoalObjectiveText(rawText);
-  const text = cleanUserHistoryText(objectiveText || rawText);
-  const attachments = extractUserAttachments(payload);
-  return (text || attachments.length) ? { text, attachments } : null;
+  const envelope = parseUserMessageEnvelope(objectiveText || rawText);
+  const text = cleanUserHistoryText(envelope.text);
+  const attachments = mergeUserHistoryAttachments(envelope.attachmentNames, extractUserAttachments(payload));
+  const turnId = String(payload.internal_chat_message_metadata_passthrough?.turn_id || '');
+  return (text || attachments.length) ? {
+    text, attachments, representation: 'response_item',
+    recordId: String(payload.client_id || payload.id || ''),
+    turnId,
+    delivery: turnId ? 'steer' : '',
+  } : null;
 }
 
 function isDuplicateAdjacentUserHistoryMessage(previous, next, timestamp = '') {
-  if (!previous || !next) return false;
-  if (previous.role && previous.role !== 'user') return false;
-  const previousText = normalizeComparableMessage(previous.text || '');
-  const nextText = normalizeComparableMessage(next.text || '');
-  if (previousText !== nextText) return false;
-  const previousAttachmentCount = Array.isArray(previous.attachments) ? previous.attachments.length : 0;
-  const nextAttachmentCount = Array.isArray(next.attachments) ? next.attachments.length : 0;
-  if (previousAttachmentCount !== nextAttachmentCount) return false;
-  const previousTime = Date.parse(previous.timestamp || '');
-  const nextTime = Date.parse(timestamp || next.timestamp || '');
-  return !Number.isFinite(previousTime) || !Number.isFinite(nextTime) || Math.abs(previousTime - nextTime) <= 1500;
+  return mergeHistoryUserPair(previous, next, timestamp).duplicate;
 }
 
 function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
@@ -1965,9 +1940,10 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
   if (threadHistoryCache.has(cacheKey)) return threadHistoryCache.get(cacheKey);
 
   const messages = [];
-  const normalizedEvents = [];
-  const sessionNormalizer = createSessionNormalizer({ session: { isSubagent: false } });
+  const historyEntries = [];
   let currentTurn = null;
+  let lastUserHistoryMessage = null;
+  let lastUserHistoryIndex = -1;
   function addAssistantMessage(turn, text, timestamp, label = 'Codex') {
     const normalizedText = normalizeHistoryText(text);
     if (!normalizedText) return;
@@ -2078,10 +2054,11 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     let item;
     try { item = JSON.parse(line); } catch { continue; }
     const payload = item.payload || {};
-    const normalizedEvent = sessionNormalizer.normalize(item);
-    if (normalizedEvent) normalizedEvents.push(normalizedEvent);
+    historyEntries.push({ nextOffset: historyEntries.length + 1, item });
 
     if (item.type === 'event_msg' && payload.type === 'task_started') {
+      lastUserHistoryMessage = null;
+      lastUserHistoryIndex = -1;
       currentTurn = {
         hasAssistant: false,
         assistantIndex: -1,
@@ -2107,21 +2084,34 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
 
     const userHistoryMessage = extractUserHistoryMessage(item);
     if (userHistoryMessage) {
-      const { text, attachments } = userHistoryMessage;
-      if (
-        (text || attachments.length) &&
-        !isDuplicateAdjacentUserHistoryMessage(messages[messages.length - 1], userHistoryMessage, item.timestamp || '')
-      ) {
+      const merged = mergeHistoryUserPair(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '');
+      const duplicate = isDuplicateAdjacentUserHistoryMessage(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '');
+      const { text, attachments } = merged.message;
+      const projectedAttachments = attachments.map(filePath => ({ filePath, name: path.basename(filePath) }));
+      if ((text || attachments.length) && !duplicate) {
+        lastUserHistoryIndex = messages.length;
         messages.push({
           role: 'user',
           label: attachments.length ? `你 · ${attachments.length} 张图片` : '你',
           text: text || (attachments.length ? ' ' : ''),
-          attachments: attachments.map(filePath => ({ filePath, name: path.basename(filePath) })),
+          attachments: projectedAttachments,
           timestamp: item.timestamp || '',
         });
+      } else if (duplicate && lastUserHistoryIndex >= 0 && messages[lastUserHistoryIndex]) {
+        messages[lastUserHistoryIndex] = {
+          ...messages[lastUserHistoryIndex],
+          label: attachments.length ? `你 · ${attachments.length} 张图片` : '你',
+          text: text || (attachments.length ? ' ' : ''),
+          attachments: projectedAttachments,
+          timestamp: merged.message.timestamp || messages[lastUserHistoryIndex].timestamp || '',
+        };
       }
+      lastUserHistoryMessage = merged.message;
       continue;
     }
+
+    lastUserHistoryMessage = null;
+    lastUserHistoryIndex = -1;
 
     if (currentTurn) {
       const step = addHistoryStep(currentTurn, item);
@@ -2176,6 +2166,9 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     }
   }
 
+  const historyReconciler = new EventReconciler({ serverInstanceId: 'history-parser' });
+  const normalizedEvents = historyReconciler.rehydrate(historyEntries).events;
+
   return boundedSet(threadHistoryCache, cacheKey, {
     ok: true,
     available: true,
@@ -2183,7 +2176,7 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     sessionFile: path.basename(file),
     truncated: historyTail.stat.size > CODEX_HISTORY_TAIL_BYTES,
     messages: messages.slice(-normalizedLimit),
-    turns: buildTurnViews(normalizedEvents, threadId).slice(-normalizedLimit),
+    turns: buildTurnViews(registerHistoryEventAttachments(normalizedEvents), threadId).slice(-normalizedLimit),
   }, 80);
 }
 
@@ -2309,35 +2302,55 @@ function inlineAttachmentDataUrl(filePath = '', mimeType = '') {
 
 function attachmentFilePath(attachment = {}) {
   const directPath = String(attachment.filePath || attachment.path || '');
-  if (directPath) return directPath;
-  const sourceUrl = String(attachment.url || '');
-  if (!sourceUrl) return '';
+  return directPath;
+}
+
+function trustedLocalCapabilityUrl(value, req) {
+  const source = String(value || '').trim();
+  if (!source || source.length > 4096 || redactDiagnosticString(source) !== source) return '';
   try {
-    const parsed = new URL(sourceUrl);
-    if (parsed.pathname !== '/codex/attachment') return '';
-    return String(parsed.searchParams.get('path') || '');
+    const base = new URL(requestBaseUrl(req));
+    const parsed = new URL(source, base);
+    if (parsed.origin !== base.origin || parsed.username || parsed.password || parsed.search || parsed.hash
+      || !/^\/codex\/attachment\/[A-Za-z0-9_-]{32}$/.test(parsed.pathname)
+      || !capabilityAttachmentFile(parsed)) return '';
+    return parsed.pathname;
   } catch {
     return '';
   }
 }
 
-function safeRemoteAttachmentUrl(value) {
-  const source = String(value || '').trim();
-  if (!source || source.length > 4096 || redactDiagnosticString(source) !== source) return '';
-  try {
-    const parsed = new URL(source);
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return '';
-    return parsed.toString();
-  } catch {
-    return '';
-  }
+function registerHistoryEventAttachments(events) {
+  return (Array.isArray(events) ? events : []).map(event => {
+    if (!event || !Array.isArray(event.attachments) || event.attachments.length === 0) return event;
+    const attachments = event.attachments.map(attachment => {
+      const filePath = attachmentFilePath(attachment) || getPrivateAttachmentSource(attachment);
+      const name = path.basename(String(attachment.name || filePath || 'image')) || 'image';
+      const declaredSize = Number(attachment.size);
+      const metadata = {
+        name,
+        mime: String(attachment.mime || attachment.mimeType || imageMimeTypeForFile(filePath) || 'image/*').slice(0, 128),
+        ...(Number.isFinite(declaredSize) && declaredSize >= 0 ? { size: Math.floor(declaredSize) } : {}),
+      };
+      const registered = filePath ? registerOutputAttachment(filePath) : null;
+      if (!registered) return metadata;
+      return setPrivateAttachmentSource({
+        name,
+        mime: registered.mimeType,
+        mimeType: registered.mimeType,
+        size: registered.size,
+        url: `/codex/attachment/${registered.handle}`,
+      }, registered.filePath);
+    }).filter(Boolean);
+    return { ...event, attachments };
+  });
 }
 
 function enrichAttachmentList(attachments, req, options = {}) {
   if (!Array.isArray(attachments) || !attachments.length) return attachments;
   const inlineData = options.inlineData !== false;
   return attachments.map(attachment => {
-    const filePath = attachmentFilePath(attachment);
+    const filePath = attachmentFilePath(attachment) || getPrivateAttachmentSource(attachment);
     const mimeType = String(attachment.mime || attachment.mimeType || imageMimeTypeForFile(filePath) || 'image/*')
       .trim().slice(0, 128) || 'image/*';
     const name = path.basename(String(attachment.name || filePath || 'image')) || 'image';
@@ -2356,13 +2369,13 @@ function enrichAttachmentList(attachments, req, options = {}) {
           mime: registered.mimeType,
           mimeType: registered.mimeType,
           size: registered.size,
-          url: new URL(`/codex/attachment/${registered.handle}`, requestBaseUrl(req)).toString(),
+          url: `/codex/attachment/${registered.handle}`,
           ...(inlineData ? { dataUrl: inlineAttachmentDataUrl(registered.filePath, registered.mimeType) } : {}),
         };
       }
       return metadata;
     }
-    const sourceUrl = safeRemoteAttachmentUrl(attachment.url);
+    const sourceUrl = trustedLocalCapabilityUrl(attachment.url, req);
     const dataUrl = String(attachment.dataUrl || '');
     if (sourceUrl) {
       return { ...metadata, url: sourceUrl };
@@ -2447,6 +2460,25 @@ function enrichHistoryTurn(turn, req) {
           : {}),
       }));
     }
+  }
+  if (Array.isArray(next.timeline)) {
+    next.timeline = next.timeline.map(entry => ({
+      ...entry,
+      ...(Array.isArray(entry.attachments)
+        ? { attachments: enrichAttachmentList(entry.attachments, req, { inlineData: false }) }
+        : {}),
+    }));
+  }
+  if (Array.isArray(next.segments)) {
+    next.segments = next.segments.map(segment => ({
+      ...segment,
+      items: Array.isArray(segment.items) ? segment.items.map(item => ({
+        ...item,
+        ...(Array.isArray(item.attachments)
+          ? { attachments: enrichAttachmentList(item.attachments, req, { inlineData: false }) }
+          : {}),
+      })) : [],
+    }));
   }
   return next;
 }
@@ -3212,46 +3244,44 @@ function parseCodexStatus(options = {}) {
   }
 
   const context = contextUsageFromItems(rawItems);
-  const configText = readCodexConfigText();
   const parsedModel = currentModelFromItems(rawItems);
   const parsedReasoningMode = currentReasoningModeFromItems(rawItems);
   const parsedSpeedMode = currentSpeedModeFromItems(rawItems);
-  const configModel = modelInfoFromId(tomlStringValue(configText, 'model'));
-  const configReasoningMode = reasoningModeFromValue(tomlStringValue(configText, 'model_reasoning_effort'));
-  const configSpeedMode = speedModeFromValue(tomlStringValue(configText, 'service_tier'));
-  const controlOverrides = readAppState().controlOverrides || {};
-  const liveModeState = options.liveModeState || null;
   const liveModeOptions = options.liveModeOptions || null;
-  const liveModel = liveModeState && liveModeState.model && liveModeState.model.available ? liveModeState.model : null;
-  const liveReasoningMode = liveModeState && liveModeState.reasoningMode && liveModeState.reasoningMode.available ? liveModeState.reasoningMode : null;
-  const liveSpeedMode = liveModeState && liveModeState.speedMode && liveModeState.speedMode.available ? liveModeState.speedMode : null;
-  const overrideModel = controlOverrideModel(controlOverrides, parsedModel);
-  const overrideReasoningMode = controlOverrideReasoning(controlOverrides, parsedReasoningMode);
-  const overrideSpeedMode = controlOverrideSpeed(controlOverrides, parsedSpeedMode);
-  const model = [
-    liveModel,
-    overrideModel,
-    configModel,
-    parsedModel && parsedModel.available ? parsedModel : null,
-  ].find(Boolean);
-  const reasoningMode = [
-    liveReasoningMode,
-    overrideReasoningMode,
-    configReasoningMode,
-    parsedReasoningMode && parsedReasoningMode.available ? parsedReasoningMode : null,
-  ].find(Boolean);
-  const speedMode = [
-    liveSpeedMode,
-    overrideSpeedMode,
-    configSpeedMode,
-    parsedSpeedMode && parsedSpeedMode.available ? parsedSpeedMode : null,
-  ].find(Boolean);
-  const speedSupported = codexModelSupportsSpeed(model);
+  const nextTurnSettings = options.nextTurnSettings || options.liveModeState || {
+    available: false,
+    source: 'codex-desktop-composer-dom',
+    confidence: 'unavailable',
+    reason: 'DESKTOP_SELECTION_UNAVAILABLE',
+  };
+  const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
+    ? nextTurnSettings.model
+    : modelInfoFromId('');
+  const currentReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
+    ? nextTurnSettings.reasoningMode
+    : reasoningModeFromValue('');
+  const currentSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
+    ? nextTurnSettings.speed
+    : speedModeFromValue('');
+  const lastObservedAt = [parsedModel.updatedAt, parsedReasoningMode.updatedAt, parsedSpeedMode.updatedAt]
+    .filter(Boolean)
+    .sort()
+    .pop() || '';
+  const lastTurnSettings = {
+    available: Boolean(parsedModel.available || parsedReasoningMode.available || parsedSpeedMode.available),
+    source: 'session-turn-context',
+    confidence: 'observed',
+    observedAt: lastObservedAt,
+    model: parsedModel,
+    reasoningMode: parsedReasoningMode,
+    speed: parsedSpeedMode,
+  };
+  const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
   const modelOptions = modelOptionsForClient(liveModeOptions);
   const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
     ? liveModeOptions.reasoningOptions
     : Object.values(REASONING_MODE_TARGETS);
-  const speedOptions = resolveLiveSpeedOptions(speedSupported, speedMode, liveModeOptions);
+  const speedOptions = resolveLiveSpeedOptions(speedSupported, currentSpeed, liveModeOptions);
   const threadId = threadIdFromSessionFile(file);
   const failed = completed && !final && (emptyComplete || Boolean(failureText));
   const finalFailureText = failed
@@ -3280,16 +3310,18 @@ function parseCodexStatus(options = {}) {
     completedAt,
     durationMs,
     context,
-    model,
-    currentModel: model,
+    model: parsedModel,
+    currentModel,
     modelOptions,
-    reasoningMode,
-    currentReasoning: reasoningMode,
+    reasoningMode: parsedReasoningMode,
+    currentReasoning,
     reasoningOptions,
-    speedMode,
-    currentSpeed: speedMode,
+    speedMode: parsedSpeedMode,
+    currentSpeed,
     speedSupported,
     speedOptions,
+    lastTurnSettings,
+    nextTurnSettings,
     processText: compactProcessText(statusSteps),
     preview: final || preview || finalFailureText || (waiting ? '已发送，等待 Codex 开始回复…' : active ? 'Codex 正在回复…' : '暂无可显示回复。'),
     final: final || '',
@@ -3304,16 +3336,17 @@ async function handleCodexStatus(req, res) {
   }
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const liveModeState = await readLiveCodexComposerModeState();
+    const requestedThreadId = url.searchParams.get('thread') || '';
+    const nextTurnSettings = await readLiveCodexComposerModeState({ threadId: requestedThreadId });
     const liveModeOptions = cachedLiveModeOptions();
     const status = attachForegroundNotice(enrichStatusAttachments(parseCodexStatus({
       since: url.searchParams.get('since') || '',
       sessionFile: url.searchParams.get('session') || '',
-      threadId: url.searchParams.get('thread') || '',
+      threadId: requestedThreadId,
       expectNewThread: url.searchParams.get('expectNewThread') === '1',
       excludeThreadId: url.searchParams.get('excludeThread') || '',
       cwd: url.searchParams.get('cwd') || '',
-      liveModeState,
+      nextTurnSettings,
       liveModeOptions,
     }), req));
     return json(res, 200, status);
@@ -3341,11 +3374,12 @@ async function handleSelectThread(req, res) {
 
   try {
     invalidateCodexThreadListCache();
-    await activateCodexThread(threadId);
-    return json(res, 200, { ok: true, threadId, message: '已切换到所选 Codex 线程。' });
+    const result = await desktopSelectionAdapter.openDesktopThread(threadId);
+    const ok = result.status === 'confirmed';
+    return json(res, ok ? 200 : result.status === 'uncertain' ? 409 : 503, { ok, ...result });
   } catch (error) {
     const explained = explainTargetError(error, 'codex');
-    return json(res, 500, { ok: false, ...explained });
+    return json(res, Number(error && (error.statusCode || error.status)) || 500, { ok: false, ...explained });
   }
 }
 
@@ -4236,17 +4270,15 @@ async function readCodexComposerTextInCdpClient(client) {
 }
 
 function composerReferenceKindForSection(section = '') {
-  if (section === '插件') return 'plugin';
-  if (section === 'Add') return 'mode';
-  return 'reference';
+  return classifyMenuItem({ group: section }).kind;
 }
 
 function composerSelectionFromLabel(label = '', source = {}) {
   const text = String(label || source.label || source.text || source.target || '').replace(/\s+/g, ' ').trim();
-  const row = findKnownCodexPlusMenuRow(text) || findKnownCodexPlusMenuRow(source.text || '') || { label: text, section: source.section || '插件' };
+  const row = findKnownCodexPlusMenuRow(text) || findKnownCodexPlusMenuRow(source.text || '') || { label: text, section: source.section || '' };
   const target = String(source.target || row.label || text).replace(/\s+/g, ' ').trim();
   const section = row.section || source.section || '';
-  const kind = source.kind || composerReferenceKindForSection(section);
+  const kind = classifyMenuItem({ ...row, ...source, group: section, label: row.label || text }).kind;
   const safeId = (target || row.label || text || 'reference')
     .toLowerCase()
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
@@ -4258,12 +4290,15 @@ function composerSelectionFromLabel(label = '', source = {}) {
     label: row.label || text,
     target: target || row.label || text,
     text: source.text || text,
-    removable: true,
+    removable: kind === 'plugin' || kind === 'add' || kind === 'mode',
     source: 'codex-cdp-composer',
   };
 }
 
-function shouldVerifyCodexPlusMenuInsertion(labels = []) {
+function shouldVerifyCodexPlusMenuInsertion(labels = [], selection = {}) {
+  const kind = classifyMenuItem(selection).kind;
+  if (kind === 'subagent' || kind === 'filePicker' || kind === 'unknown') return false;
+  if (kind === 'plugin' || kind === 'add' || kind === 'mode') return true;
   const text = uniqueTextList(labels).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!text) return false;
   return !/files and folders|file and folder|文件|文件夹|folder/.test(text);
@@ -4279,9 +4314,10 @@ function normalizeComposerSelectionHint(selection = {}, fallbackTarget = '') {
   const section = String(selection && selection.section || '').trim();
   const kind = String(selection && selection.kind || '').trim();
   const row = findKnownCodexPlusMenuRow(target) || findKnownCodexPlusMenuRow(label) || null;
+  const classification = classifyMenuItem({ ...row, ...selection, kind, group: section || row && row.section || '', label });
   return {
     id: String(selection && selection.id || '').trim(),
-    kind: kind || composerReferenceKindForSection(section || row && row.section || ''),
+    kind: classification.kind,
     section: section || row && row.section || '',
     label: label || target,
     target,
@@ -4292,10 +4328,7 @@ function normalizeComposerSelectionHint(selection = {}, fallbackTarget = '') {
 
 function isPluginComposerSelection(selection = {}, labels = []) {
   const hint = normalizeComposerSelectionHint(selection, uniqueTextList(labels)[0] || '');
-  const section = String(hint.section || '').trim();
-  const kind = String(hint.kind || '').trim().toLowerCase();
-  const row = findKnownCodexPlusMenuRow(hint.target) || findKnownCodexPlusMenuRow(hint.label) || null;
-  return kind === 'plugin' || section === '插件' || Boolean(row && row.section === '插件');
+  return String(hint.kind || '').trim().toLowerCase() === 'plugin';
 }
 
 async function readCodexComposerReferenceStateInCdpClient(client, labels = []) {
@@ -4831,7 +4864,12 @@ function normalizeCodexPlusMenuItem(item = {}, order = 0) {
   const rawText = String(item.text || rawLines.join(' ') || '').replace(/\s+/g, ' ').trim();
   if (!rawText) return null;
   const row = findKnownCodexPlusMenuRow(rawText)
-    || { label: rawLines[0] || rawText, section: '插件' };
+    || { label: rawLines[0] || rawText, section: String(item.group || item.header || '') };
+  const classification = classifyMenuItem({
+    ...item,
+    group: item.group || item.header || row.section,
+    label: row.label,
+  });
   const description = rawLines.length > 1
     ? rawLines.slice(1).join(' ')
     : (rawText === row.label ? '' : rawText.slice(row.label.length).replace(/\s+/g, ' ').trim());
@@ -4843,7 +4881,8 @@ function normalizeCodexPlusMenuItem(item = {}, order = 0) {
     description,
     text: rawText,
     target: row.label,
-    disabled: false,
+    kind: classification.kind,
+    disabled: item.disabled === true || !classification.executable,
     order,
   };
 }
@@ -5090,10 +5129,10 @@ async function clickCodexPlusMenuItemDomFallback(client, labels = [], rect = {})
   return result;
 }
 
-async function clickCodexPlusMenuItemWithFallback(client, item = {}, labels = []) {
+async function clickCodexPlusMenuItemWithFallback(client, item = {}, labels = [], selection = {}) {
   await cdpClickRect(client, item.rect);
   await delay(260);
-  if (shouldVerifyCodexPlusMenuInsertion(labels)) {
+  if (shouldVerifyCodexPlusMenuInsertion(labels, selection)) {
     const state = await readCodexComposerReferenceStateInCdpClient(client, labels).catch(() => null);
     if (state && state.matched === true) {
       return { ok: true, method: 'cdp-mouse', state };
@@ -5216,7 +5255,7 @@ async function clickCodexPlusRectWithoutSendCheck(client, rect = {}) {
   }
 }
 
-async function selectCodexPlusMenuItemViaCdp(labels = []) {
+async function selectCodexPlusMenuItemViaCdp(labels = [], selectionHint = {}) {
   const targetLabels = uniqueTextList(labels);
   await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
@@ -5229,7 +5268,14 @@ async function selectCodexPlusMenuItemViaCdp(labels = []) {
     await focusCodexComposerInCdpClient(client).catch(() => {});
     await closeCodexCdpMenus(client).catch(() => {});
     let snapshot = await readCodexModeMenuSnapshot(client);
-    if (shouldVerifyCodexPlusMenuInsertion(targetLabels) && hasCodexRunningStopControl(snapshot)) {
+    const expected = classifyMenuItem(selectionHint);
+    if (!isExecutableMenuItem(expected)) {
+      const error = new Error('Unknown Codex plus-menu rows are not executable.');
+      error.status = 409;
+      error.code = 'CODEX_COMPOSER_ITEM_UNKNOWN';
+      throw error;
+    }
+    if (shouldVerifyCodexPlusMenuInsertion(targetLabels, expected) && hasCodexRunningStopControl(snapshot)) {
       const error = new Error('Codex 当前正在回复，插件或模式引用暂不可插入，请等待回复结束后再试。');
       error.status = 409;
       error.code = 'CODEX_COMPOSER_ACTION_UNAVAILABLE_WHILE_RUNNING';
@@ -5259,11 +5305,26 @@ async function selectCodexPlusMenuItemViaCdp(labels = []) {
         .slice(-80));
       throw error;
     }
-    await clickCodexPlusMenuItemWithFallback(client, item, targetLabels);
+    const actual = classifyMenuItem({ ...item, label: item.text });
+    if (!isExecutableMenuItem(actual) || actual.kind !== expected.kind) {
+      const error = new Error('Codex plus-menu item kind could not be verified.');
+      error.status = 409;
+      error.code = 'CODEX_COMPOSER_KIND_MISMATCH';
+      throw error;
+    }
+    await clickCodexPlusMenuItemWithFallback(client, item, targetLabels, actual);
     await delay(CODEX_COMMAND_SETTLE_MS);
-    if (shouldVerifyCodexPlusMenuInsertion(targetLabels)) {
-      const verified = await verifyCodexComposerReferenceInserted(client, targetLabels, item);
-      return { ok: true, selected: item, selection: verified.selection, state: verified.state };
+    if (actual.kind === 'subagent') {
+      return {
+        ok: true,
+        selected: { ...item, kind: 'subagent' },
+        selection: composerSelectionFromLabel(targetLabels[0], { ...item, kind: 'subagent', target: targetLabels[0] }),
+      };
+    }
+    if (shouldVerifyCodexPlusMenuInsertion(targetLabels, actual)) {
+      const typedItem = { ...item, kind: actual.kind, section: item.section || item.group || '' };
+      const verified = await verifyCodexComposerReferenceInserted(client, targetLabels, typedItem);
+      return { ok: true, selected: typedItem, selection: verified.selection, state: verified.state };
     }
     return { ok: true, selected: item, selection: null };
   } finally {
@@ -5608,12 +5669,38 @@ async function readCodexModeMenuSnapshot(client) {
     const composerEditor = [...document.querySelectorAll('.ProseMirror,[contenteditable="true"],textarea,input')]
       .filter(visible)
       .sort((a, b) => b.getBoundingClientRect().y - a.getBoundingClientRect().y)[0] || null;
+    const groupOf = el => {
+      const parent = el.closest('[role="group"],[data-group],[data-section],[aria-labelledby]');
+      if (parent) {
+        const labelledBy = parent.getAttribute('aria-labelledby') || '';
+        const labelled = labelledBy ? document.getElementById(labelledBy) : null;
+        return String(parent.getAttribute('aria-label') || parent.getAttribute('data-group') || parent.getAttribute('data-section') || labelled && labelled.textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      let sibling = el.previousElementSibling;
+      while (sibling) {
+        if (/^(H[1-6])$/.test(sibling.tagName) || sibling.getAttribute('role') === 'heading') return String(sibling.textContent || '').replace(/\s+/g, ' ').trim();
+        sibling = sibling.previousElementSibling;
+      }
+      return '';
+    };
     const items = [...document.querySelectorAll('button,[role="button"],[role="menuitem"],[role="option"],[cmdk-item],[data-radix-collection-item]')]
       .filter(visible)
       .map(el => {
         return {
           text: textOf(el),
           role: el.getAttribute('role') || '',
+          ariaRole: el.getAttribute('role') || '',
+          ariaLabel: el.getAttribute('aria-label') || '',
+          group: groupOf(el),
+          action: el.getAttribute('data-action') || el.getAttribute('data-command') || '',
+          actionIdentity: el.getAttribute('data-action-id') || '',
+          pluginId: el.getAttribute('data-plugin-id') || '',
+          dataAttributes: {
+            kind: el.getAttribute('data-kind') || '',
+            itemKind: el.getAttribute('data-item-kind') || '',
+            itemType: el.getAttribute('data-item-type') || '',
+            action: el.getAttribute('data-action') || '',
+          },
           state: el.getAttribute('data-state') || '',
           checked: el.getAttribute('aria-checked') || '',
           hasPopup: el.getAttribute('aria-haspopup') || '',
@@ -5786,6 +5873,13 @@ async function selectCodexComposerModeMenuItemViaCdp(targetLabels = [], options 
       error.detail = JSON.stringify(summaryItems(snapshot));
       throw error;
     }
+    await assertExactThreadBeforeSideEffect({
+      threadId: options.threadId,
+      action: options.action || `control.${kind || 'mode'}`,
+      observe: async () => normalizeCurrentThreadSelection(
+        await cdpEvaluate(client, verifiedSelectionExpression()),
+      ),
+    });
     await cdpClickRect(client, targetItem.rect);
     await delay(480);
     const result = {
@@ -5807,17 +5901,17 @@ async function selectCodexComposerModeMenuItemViaCdp(targetLabels = [], options 
   }
 }
 
-async function selectCodexModelViaCdp(target = {}) {
+async function selectCodexModelViaCdp(target = {}, threadId = '') {
   const labels = uniqueTextList(modelTextCandidates(target));
-  return selectCodexComposerModeMenuItemViaCdp(labels, { kind: 'model' });
+  return selectCodexComposerModeMenuItemViaCdp(labels, { kind: 'model', threadId, action: 'control.model' });
 }
 
-async function selectCodexReasoningModeViaCdp(target = {}) {
+async function selectCodexReasoningModeViaCdp(target = {}, threadId = '') {
   const labels = uniqueTextList([target.displayName, target.label, target.value, target.key]);
-  return selectCodexComposerModeMenuItemViaCdp(labels, { kind: 'reasoning' });
+  return selectCodexComposerModeMenuItemViaCdp(labels, { kind: 'reasoning', threadId, action: 'control.reasoning' });
 }
 
-async function selectCodexSpeedModeViaCdp(target = {}) {
+async function selectCodexSpeedModeViaCdp(target = {}, threadId = '') {
   const labels = uniqueTextList([
     target.displayName,
     target.label,
@@ -5833,7 +5927,7 @@ async function selectCodexSpeedModeViaCdp(target = {}) {
     target.key === 'standard' ? '\u9ed8\u8ba4' : '',
     target.key === 'standard' ? 'default' : '',
   ]);
-  return selectCodexComposerModeMenuItemViaCdp(labels, { kind: 'speed' });
+  return selectCodexComposerModeMenuItemViaCdp(labels, { kind: 'speed', threadId, action: 'control.serviceTier' });
 }
 
 async function readCodexComposerModeButtonTextViaCdp() {
@@ -5888,7 +5982,6 @@ async function readCodexComposerModeStateViaCdp(options = {}) {
   try {
     await client.call('Runtime.enable').catch(() => {});
     return await cdpEvaluate(client, `(() => {
-      const reasoningLabels = ['低', '中', '高', '超高'];
       const visible = el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -5899,47 +5992,24 @@ async function readCodexComposerModeStateViaCdp(options = {}) {
         el.getAttribute('aria-label') || '',
         el.getAttribute('title') || '',
       ].join(' ').replace(/\\s+/g, ' ').trim();
-      const items = [...document.querySelectorAll('button,[role="button"]')]
+      const selectionEvidenceBefore = ${verifiedSelectionExpression()};
+      const triggers = [...document.querySelectorAll('button[data-codex-intelligence-trigger="true"]')]
         .filter(visible)
         .map(el => {
-          const rect = el.getBoundingClientRect();
-          const text = textOf(el);
-          const compact = text.replace(/\\s+/g, '');
-          const hasReasoning = reasoningLabels.some(label => compact.includes(label));
-          const intelligenceTrigger = el.getAttribute('data-codex-intelligence-trigger') === 'true';
-          const modelSelected = el.getAttribute('data-model-selected') || '';
-          const reasoningSelected = el.getAttribute('data-reasoning-selected') || '';
-          const speedSelected = el.getAttribute('data-speed-selected') || '';
-          let score = 0;
-          if (intelligenceTrigger) score += 1000;
-          if (modelSelected || reasoningSelected || speedSelected) score += 900;
-          if (/[0-9]/.test(text)) score += 50;
-          if (/gpt|codex|model/i.test(text)) score += 30;
-          if (hasReasoning) score += 45;
+          const publicVisibleText = selector => [...el.querySelectorAll(selector)]
+            .filter(node => !node.closest('[aria-hidden="true"]') && visible(node))
+            .map(textOf)
+            .filter(Boolean);
           return {
-            text,
-            score,
-            intelligenceTrigger,
-            modelSelected,
-            reasoningSelected,
-            speedSelected,
-            rect: {
-              x: Math.round(rect.x),
-              y: Math.round(rect.y),
-              w: Math.round(rect.width),
-              h: Math.round(rect.height),
-            },
+            modelTexts: publicVisibleText('[class*="_WorkTriggerModelText_"]'),
+            effortTexts: publicVisibleText('[class*="_WorkTriggerEffortLabel_"]'),
+            reasoningSelected: el.getAttribute('data-selected-reasoning-effort') || '',
+            speedSelected: el.getAttribute('data-speed-selected') || '',
+            state: el.getAttribute('data-state') || '',
           };
-        })
-        .filter(item => item.text || item.modelSelected || item.reasoningSelected || item.speedSelected)
-        .sort((a, b) => b.score - a.score);
-      const item = items[0];
-      return item ? {
-        text: item.text || '',
-        modelSelected: item.modelSelected || '',
-        reasoningSelected: item.reasoningSelected || '',
-        speedSelected: item.speedSelected || '',
-      } : null;
+        });
+      const selectionEvidenceAfter = ${verifiedSelectionExpression()};
+      return { selectionEvidenceBefore, selectionEvidenceAfter, triggers };
     })()`);
   } finally {
     client.close();
@@ -5964,25 +6034,25 @@ function speedModeFromComposerModeText(text = '') {
   return speedModeFromValue('');
 }
 
-async function readLiveCodexComposerModeState() {
+async function readLiveCodexComposerModeState(options = {}) {
+  const observedAt = new Date().toISOString();
   try {
-    const state = await readCodexComposerModeStateViaCdp({
+    const sample = await readCodexComposerModeStateViaCdp({
       autoOpen: false,
       probeTimeoutMs: CODEX_CDP_PASSIVE_PROBE_TIMEOUT_MS,
       timeoutMs: CODEX_CDP_PASSIVE_SEND_TIMEOUT_MS,
     });
-    const text = state && state.text ? state.text : '';
-    const modelSelected = state && state.modelSelected ? state.modelSelected : '';
-    const reasoningSelected = state && state.reasoningSelected ? state.reasoningSelected : '';
-    const speedSelected = state && state.speedSelected ? state.speedSelected : '';
-    if (!text && !modelSelected && !reasoningSelected && !speedSelected) return null;
-    const model = modelSelected ? modelInfoFromId(modelSelected, new Date().toISOString()) : modelInfoFromComposerModeText(text);
-    const reasoningMode = reasoningModeFromValue(reasoningSelected || reasoningKeyFromComposerModeText(text), new Date().toISOString());
-    const speedMode = speedModeFromValue(speedSelected, new Date().toISOString());
-    const parsedSpeedMode = speedMode.key ? speedMode : speedModeFromComposerModeText(text);
-    return { text, model, reasoningMode, speedMode: parsedSpeedMode };
+    return resolveNextTurnSettings(sample, {
+      requestedThreadId: options.threadId,
+      catalogOptions: modelOptionsForClient(cachedLiveModeOptions()),
+      observedAt,
+    });
   } catch {
-    return null;
+    return resolveNextTurnSettings(null, {
+      requestedThreadId: options.threadId,
+      catalogOptions: [],
+      observedAt,
+    });
   }
 }
 
@@ -6016,6 +6086,7 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
   if (!isCodexThreadId(threadId)) {
     return { ok: false, skipped: true, reason: 'empty-thread' };
   }
+  threadId = String(threadId).toLowerCase();
 
   await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget({ autoOpen: false });
@@ -6067,6 +6138,17 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
       await cdpClickRect(client, row.rect);
       await delay(CODEX_DEEPLINK_SETTLE_MS);
     }
+    const observed = normalizeCurrentThreadSelection(
+      await cdpEvaluate(client, verifiedSelectionExpression()),
+    );
+    if (!observed || observed.threadId !== threadId) {
+      return {
+        ok: false,
+        code: 'CODEX_THREAD_SELECTION_UNCONFIRMED',
+        threadId,
+        observedThreadId: observed && observed.threadId || '',
+      };
+    }
     await focusCodexComposerInCdpClient(client).catch(() => {});
     lastCodexThreadActivation = { threadId, at: Date.now() };
     return { ok: true, threadId, selected: row };
@@ -6076,6 +6158,13 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
 }
 
 async function activateCodexThreadForComposerAction(threadId = '') {
+  if (!threadId) {
+    return await focusCurrentCodexComposerForComposerAction('', {
+      ok: false,
+      skipped: true,
+      reason: 'current-composer-requested',
+    });
+  }
   if (!isCodexThreadId(threadId)) {
     return { ok: false, skipped: true };
   }
@@ -6090,7 +6179,19 @@ async function activateCodexThreadForComposerAction(threadId = '') {
     };
   }
   if (result && result.ok) return result;
-  return await focusCurrentCodexComposerForComposerAction(threadId, result);
+  const error = new Error('The requested Codex task could not be activated and confirmed exactly.');
+  error.status = 409;
+  error.statusCode = 409;
+  error.code = String(result && result.code || 'CODEX_THREAD_EXACT_ACTIVATION_REQUIRED');
+  throw error;
+}
+
+async function assertExactComposerThreadBeforeSideEffect(threadId = '', action = '') {
+  return assertExactThreadBeforeSideEffect({
+    threadId,
+    action,
+    observe: async () => readCurrentCodexThreadSelectionViaCdp(),
+  });
 }
 
 async function focusCurrentCodexComposerForComposerAction(threadId = '', activationResult = null) {
@@ -6684,6 +6785,9 @@ async function switchCodexGuiModel(threadId = '', targetKey = '') {
     error.code = 'BAD_THREAD_ID';
     throw error;
   }
+  if (threadId) {
+    await activateCodexThreadForComposerAction(threadId);
+  }
   const file = threadId ? findCodexSessionFileByThreadId(threadId) : findLatestCodexSessionFile();
   const current = file ? currentModelFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : modelInfoFromId('');
   const target = modelSwitchTargetForCurrent(current, targetKey);
@@ -6691,11 +6795,12 @@ async function switchCodexGuiModel(threadId = '', targetKey = '') {
   let liveTargetModel = null;
   let liveSyncError = null;
   try {
-    liveTargetModel = await trySyncCodexModelViaExistingCdp(target);
+    liveTargetModel = await trySyncCodexModelViaExistingCdp(target, threadId);
   } catch (error) {
     liveSyncError = error;
   }
   assertExplicitUiActionNotAborted();
+  await assertExactComposerThreadBeforeSideEffect(threadId, 'control.model');
   const configTargetModel = await trySwitchCodexModelViaConfig(liveTargetModel || target);
   const finalTargetModel = liveTargetModel || configTargetModel;
   assertExplicitUiActionNotAborted();
@@ -6749,9 +6854,9 @@ async function requireExistingCodexCdpTargetForSwitch(kind = 'control') {
   }
 }
 
-async function trySyncCodexModelViaExistingCdp(target = {}) {
+async function trySyncCodexModelViaExistingCdp(target = {}, threadId = '') {
   await requireExistingCodexCdpTargetForSwitch('model');
-  const selection = await selectCodexModelViaCdp(target);
+  const selection = await selectCodexModelViaCdp(target, threadId);
   await delay(CODEX_COMMAND_SETTLE_MS);
   const verified = await verifyCodexModelSwitch('', target, {
     timeoutMs: CODEX_CONFIG_SWITCH_VERIFY_MS,
@@ -6788,6 +6893,9 @@ async function switchCodexReasoningMode(threadId = '', targetKey = '') {
     error.code = 'BAD_THREAD_ID';
     throw error;
   }
+  if (threadId) {
+    await activateCodexThreadForComposerAction(threadId);
+  }
   const file = threadId ? findCodexSessionFileByThreadId(threadId) : findLatestCodexSessionFile();
   const current = file ? currentReasoningModeFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : reasoningModeFromValue('');
   const target = reasoningModeTargetForCurrent(current, targetKey);
@@ -6795,11 +6903,12 @@ async function switchCodexReasoningMode(threadId = '', targetKey = '') {
   let liveTargetReasoning = null;
   let liveSyncError = null;
   try {
-    liveTargetReasoning = await trySyncCodexReasoningViaExistingCdp(target);
+    liveTargetReasoning = await trySyncCodexReasoningViaExistingCdp(target, threadId);
   } catch (error) {
     liveSyncError = error;
   }
   assertExplicitUiActionNotAborted();
+  await assertExactComposerThreadBeforeSideEffect(threadId, 'control.reasoning');
   const configTargetReasoning = await trySwitchCodexReasoningViaConfig(liveTargetReasoning || target);
   const finalTargetReasoning = liveTargetReasoning || configTargetReasoning;
   assertExplicitUiActionNotAborted();
@@ -6839,9 +6948,9 @@ async function trySwitchCodexReasoningViaConfig(target = {}) {
   };
 }
 
-async function trySyncCodexReasoningViaExistingCdp(target = {}) {
+async function trySyncCodexReasoningViaExistingCdp(target = {}, threadId = '') {
   await requireExistingCodexCdpTargetForSwitch('reasoning');
-  const selection = await selectCodexReasoningModeViaCdp(target);
+  const selection = await selectCodexReasoningModeViaCdp(target, threadId);
   await delay(CODEX_COMMAND_SETTLE_MS);
   const verified = await verifyCodexReasoningModeSwitch('', target, selection, {
     timeoutMs: CODEX_CONFIG_SWITCH_VERIFY_MS,
@@ -6857,6 +6966,9 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
     error.code = 'BAD_THREAD_ID';
     throw error;
   }
+  if (threadId) {
+    await activateCodexThreadForComposerAction(threadId);
+  }
   const file = threadId ? findCodexSessionFileByThreadId(threadId) : findLatestCodexSessionFile();
   const configSpeed = speedModeFromValue(tomlStringValue(readCodexConfigText(), 'service_tier'));
   const current = file ? currentSpeedModeFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : configSpeed;
@@ -6864,7 +6976,7 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
   const parsedModel = file ? currentModelFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : configModel;
   const controlOverrides = readAppState().controlOverrides || {};
   const currentMode = controlOverrideSpeed(controlOverrides, current) || configSpeed || (current.key ? current : configSpeed);
-  const liveModeState = await readLiveCodexComposerModeState();
+  const liveModeState = await readLiveCodexComposerModeState({ threadId });
   const liveModel = liveModeState && liveModeState.model && liveModeState.model.available ? liveModeState.model : null;
   const currentModel = controlOverrideModel(controlOverrides, parsedModel) || configModel || liveModel ||
     (parsedModel && parsedModel.available ? parsedModel : configModel);
@@ -6879,11 +6991,12 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
   let liveTargetSpeed = null;
   let liveSyncError = null;
   try {
-    liveTargetSpeed = await trySyncCodexSpeedViaExistingCdp(target);
+    liveTargetSpeed = await trySyncCodexSpeedViaExistingCdp(target, threadId);
   } catch (error) {
     liveSyncError = error;
   }
   assertExplicitUiActionNotAborted();
+  await assertExactComposerThreadBeforeSideEffect(threadId, 'control.serviceTier');
   const configTargetSpeed = await trySwitchCodexSpeedViaConfig(liveTargetSpeed || target);
   const finalTargetSpeed = liveTargetSpeed || configTargetSpeed;
   assertExplicitUiActionNotAborted();
@@ -6923,9 +7036,9 @@ async function trySwitchCodexSpeedViaConfig(target = {}) {
   return verifiedTargetSpeed;
 }
 
-async function trySyncCodexSpeedViaExistingCdp(target = {}) {
+async function trySyncCodexSpeedViaExistingCdp(target = {}, threadId = '') {
   await requireExistingCodexCdpTargetForSwitch('speed');
-  const selection = await selectCodexSpeedModeViaCdp(target);
+  const selection = await selectCodexSpeedModeViaCdp(target, threadId);
   await delay(CODEX_COMMAND_SETTLE_MS);
   return {
     ...target,
@@ -6972,9 +7085,24 @@ async function runCodexComposerAction(threadId = '', action = '', target = '', s
     error.code = 'BAD_THREAD_ID';
     throw error;
   }
+  const normalizedAction = String(action || '').trim().toLowerCase();
+  const itemActions = new Set(['plus-menu-item', 'remove-plus-menu-item', 'plugin']);
+  const classifiedSelection = classifyMenuItem(normalizeComposerSelectionHint(selectionHint, target));
+  if (itemActions.has(normalizedAction) && !isExecutableMenuItem(classifiedSelection)) {
+    const error = new Error('Unknown composer menu rows are not executable.');
+    error.status = 409;
+    error.code = 'CODEX_COMPOSER_ITEM_UNKNOWN';
+    throw error;
+  }
+  if (normalizedAction === 'plugin' && classifiedSelection.kind !== 'plugin'
+    || normalizedAction === 'remove-plus-menu-item' && classifiedSelection.kind === 'subagent') {
+    const error = new Error('Composer action does not match the selected menu item kind.');
+    error.status = 409;
+    error.code = 'CODEX_COMPOSER_KIND_MISMATCH';
+    throw error;
+  }
   assertCodexComposerActionThreadIdle(threadId);
   await activateCodexThreadForComposerAction(threadId);
-  const normalizedAction = String(action || '').trim().toLowerCase();
 
   switch (normalizedAction) {
     case 'compact': {
@@ -6982,11 +7110,11 @@ async function runCodexComposerAction(threadId = '', action = '', target = '', s
       return { ok: true, action: normalizedAction, threadId, target, message: '已打开 Codex 压缩上下文。', selected: result.selected };
     }
     case 'goal': {
-      const result = await selectCodexPlusMenuItemViaCdp(['目标设置', '目标', 'Goal']);
+      const result = await selectCodexPlusMenuItemViaCdp(['目标设置', '目标', 'Goal'], { kind: 'mode' });
       return { ok: true, action: normalizedAction, threadId, target, message: '目标模式已插入 Codex 输入框。', selected: result.selected, selection: result.selection };
     }
     case 'plan': {
-      const result = await selectCodexPlusMenuItemViaCdp(['计划模式', '计划', 'Plan']);
+      const result = await selectCodexPlusMenuItemViaCdp(['计划模式', '计划', 'Plan'], { kind: 'mode' });
       return { ok: true, action: normalizedAction, threadId, target, message: '计划模式已插入 Codex 输入框。', selected: result.selected, selection: result.selection };
     }
     case 'plus-menu-item': {
@@ -6996,7 +7124,7 @@ async function runCodexComposerAction(threadId = '', action = '', target = '', s
         error.code = 'BAD_PLUS_MENU_TARGET';
         throw error;
       }
-      const result = await selectCodexPlusMenuItemViaCdp([target]);
+      const result = await selectCodexPlusMenuItemViaCdp([target], classifiedSelection);
       return {
         ok: true,
         action: normalizedAction,
@@ -7024,7 +7152,7 @@ async function runCodexComposerAction(threadId = '', action = '', target = '', s
         error.code = 'BAD_PLUS_MENU_TARGET';
         throw error;
       }
-      const result = await selectCodexPlusMenuItemViaCdp([target]);
+      const result = await selectCodexPlusMenuItemViaCdp([target], classifiedSelection);
       return { ok: true, action: normalizedAction, threadId, target, message: `${target} 已插入 Codex 输入框。`, selected: result.selected, selection: result.selection };
     }
     default: {
@@ -7693,18 +7821,21 @@ async function handleClientConfig(req, res) {
   const state = readAppState();
   const sakura = await getSakuraRouteResult();
   const configText = readCodexConfigText();
-  const controlOverrides = state.controlOverrides || {};
   const configModel = modelInfoFromId(tomlStringValue(configText, 'model'));
   const configReasoning = reasoningModeFromValue(tomlStringValue(configText, 'model_reasoning_effort'));
   const configSpeed = speedModeFromValue(tomlStringValue(configText, 'service_tier'));
-  const liveModeState = await readLiveCodexComposerModeState();
-  const liveModel = liveModeState && liveModeState.model && liveModeState.model.available ? liveModeState.model : null;
-  const liveReasoning = liveModeState && liveModeState.reasoningMode && liveModeState.reasoningMode.available ? liveModeState.reasoningMode : null;
-  const liveSpeed = liveModeState && liveModeState.speedMode && liveModeState.speedMode.available ? liveModeState.speedMode : null;
-  const currentModel = liveModel || controlOverrideModel(controlOverrides, configModel) || configModel;
-  const currentReasoning = liveReasoning || controlOverrideReasoning(controlOverrides, configReasoning) || configReasoning;
-  const currentSpeed = liveSpeed || controlOverrideSpeed(controlOverrides, configSpeed) || configSpeed;
-  const speedSupported = codexModelSupportsSpeed(currentModel);
+  const requestedThreadId = url.searchParams.get('thread') || '';
+  const nextTurnSettings = await readLiveCodexComposerModeState({ threadId: requestedThreadId });
+  const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
+    ? nextTurnSettings.model
+    : modelInfoFromId('');
+  const currentReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
+    ? nextTurnSettings.reasoningMode
+    : reasoningModeFromValue('');
+  const currentSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
+    ? nextTurnSettings.speed
+    : speedModeFromValue('');
+  const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
   const liveModeOptions = cachedLiveModeOptions();
   const modelOptions = modelOptionsForClient(liveModeOptions);
   const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
@@ -7730,7 +7861,7 @@ async function handleClientConfig(req, res) {
     controlPort: {
       host: CODEX_CDP_HOST,
       port: codexCdpPort,
-      ready: Boolean(liveModeState),
+      ready: nextTurnSettings.available === true,
       autoOpen: false,
       permissions: [
         '读取 Codex 当前模型、思考强度、速度按钮状态',
@@ -7743,6 +7874,13 @@ async function handleClientConfig(req, res) {
     currentModel,
     currentReasoning,
     currentSpeed,
+    nextTurnSettings,
+    configuredDefaults: {
+      source: 'codex-config',
+      model: configModel,
+      reasoningMode: configReasoning,
+      speed: configSpeed,
+    },
     speedSupported,
     reasoningOptions,
     speedOptions,
@@ -8143,7 +8281,7 @@ function uiRouteMutationContext(req, payload = {}, desktopThreadId = '') {
     access,
     threadId,
     resolveTargetFromObserved: !requestedThreadId && !desktopThreadId,
-    requireObservedTargetMatch: !requestedThreadId && action !== 'control.enable',
+    requireObservedTargetMatch: action !== 'control.enable' && action !== 'thread.openDesktop',
   };
 }
 
@@ -8267,7 +8405,7 @@ async function dispatchRequest(req, res) {
   if ((req.method === 'GET' || req.method === 'POST') && req.url.startsWith('/codex/keep-awake')) return handleKeepAwake(req, res);
   if (req.method === 'GET' && pathname === '/codex/control-port') return handleControlPort(req, res);
   if (req.method === 'POST' && pathname === '/codex/control-port') return handleExplicitProcessControlRequest(req, res);
-  if (req.method === 'POST' && pathname === '/codex/select') return handleExplicitUiRequest(req, res, handleSelectThread);
+  if (req.method === 'POST' && pathname === '/codex/select') return handleSelectThread(req, res);
   if (req.method === 'POST' && pathname === '/codex/new-thread') return handleExplicitUiRequest(req, res, handleNewCodexThread);
   if (req.method === 'POST' && pathname === '/codex/thread-action') return handleExplicitUiRequest(req, res, handleThreadAction);
   if (req.method === 'GET' && pathname === '/codex/composer-plus-menu') return handleExplicitUiRequest(req, res, handleComposerPlusMenu);

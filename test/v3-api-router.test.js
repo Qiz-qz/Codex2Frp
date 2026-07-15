@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { V3ApiRouter } = require('../lib/api/v3-router');
+const { createConfirmedControls } = require('../lib/codex/capability-state');
 const { PendingRequestStore } = require('../lib/app-server/pending-request-store');
 const { AttachmentStore } = require('../lib/attachments/attachment-store');
 const { CommandCoordinator } = require('../lib/control/command-coordinator');
@@ -395,7 +396,7 @@ test('diagnostics lazily reports actual runtime and queue counts through the pri
       errors: [{
         code: 'REMOTE_NETWORK_UNAVAILABLE',
         kind: 'unavailable',
-        message: 'C:\\Users\\admin\\secret-token',
+        message: 'C:\\Users\\fixture-user\\secret-token',
       }],
       requestBody: 'REQUEST_BODY_CANARY',
       subagents: [{ prompt: 'SUBAGENT_CANARY' }],
@@ -422,7 +423,7 @@ test('diagnostics lazily reports actual runtime and queue counts through the pri
     'REQUEST_BODY_CANARY',
     'SUBAGENT_CANARY',
     'QUJDREVGRw==',
-    'C:\\Users\\admin',
+    'C:\\Users\\fixture-user',
   ]) {
     assert.equal(json.includes(canary), false, canary);
   }
@@ -1002,11 +1003,110 @@ test('queue CRUD, flush, and reconcile are guarded and flush starts turns throug
   ]);
 });
 
-test('a queue flush starts the first turn while a thread created by this router is not yet readable', async () => {
+test('collaboration catalog returns an authoritative empty list for incomplete new Codex presets', async () => {
+  const rawService = new FakeCodexService();
+  rawService.results.set('listCollaborationModes', {
+    data: [
+      { name: 'Future preset without settings', value: { mode: 'future' } },
+      { name: 'Plugin', plugin: { id: 'x' } },
+      { name: 'Subagent', subagent: { name: 'worker' } },
+    ],
+    nextCursor: null,
+  });
+  const runtime = new FakeRuntime(createConfirmedControls(rawService));
+  const { router } = createRouter({ runtime });
+
+  const response = await router.handle({
+    method: 'GET',
+    url: '/codex/v3/catalogs/collaboration-modes',
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { data: [], nextCursor: null });
+  assert.deepEqual(rawService.calls, [{
+    method: 'listCollaborationModes',
+    params: {},
+    control: undefined,
+  }]);
+});
+
+test('public event routes expose exact subagent lifecycle metadata without internal state', async () => {
+  const privateSubagent = {
+    schemaVersion: 2,
+    type: 'summary',
+    summaryKind: 'subagent',
+    eventId: 'public-feed-event',
+    id: 'public-feed-event',
+    turnId: 'turn-public',
+    text: 'backend_audit 正在执行',
+    state: 'running',
+    subagent: {
+      name: 'backend_audit', status: 'running', change: 'running',
+      aggregate: { running: 1, completed: 0, failed: 0, interrupted: 0 },
+      prompt: 'PRIVATE_PROMPT', result: 'PRIVATE_RESULT', agentThreadId: 'PRIVATE_CHILD_ID',
+    },
+  };
+  const eventRuntime = {
+    async read() {
+      return {
+        mode: 'delta',
+        events: ['running', 'failed', 'interrupted', 'future-private-state'].map((status, index) => ({
+          ...privateSubagent,
+          eventId: `public-feed-event-${index}`,
+          id: `public-feed-event-${index}`,
+          subagent: { ...privateSubagent.subagent, status },
+        })),
+        turns: [],
+      };
+    },
+    async snapshot() { return { mode: 'snapshot', events: [{ ...privateSubagent, subagent: { ...privateSubagent.subagent, status: 'completed' } }], turns: [] }; },
+    async cursor() { return {}; },
+  };
+  const { router } = createRouter({ eventRuntime });
+  const delta = await router.handle({ method: 'GET', url: `/codex/v3/threads/${THREAD}/events` });
+  const snapshot = await router.handle({ method: 'GET', url: `/codex/v3/threads/${THREAD}/events/snapshot` });
+
+  assert.deepEqual(delta.body.events[0].subagent, { name: 'backend_audit', state: 'running' });
+  assert.deepEqual(delta.body.events.map(event => event.subagent.state), ['running', 'failed', 'interrupted']);
+  assert.deepEqual(snapshot.body.events[0].subagent, { name: 'backend_audit', state: 'completed' });
+  for (const response of [delta.body, snapshot.body]) {
+    assert.doesNotMatch(JSON.stringify(response), /change|aggregate|PRIVATE_PROMPT|PRIVATE_RESULT|PRIVATE_CHILD_ID|agentThreadId/);
+    assert.match(JSON.stringify(response), /"state":"(?:running|completed|failed|interrupted)"/);
+  }
+});
+
+test('settings action returns confirmed-request provenance from native controls unchanged', async () => {
+  const { router, service } = createRouter();
+  const result = {
+    status: 'confirmed',
+    operation: 'thread.settings',
+    observation: {
+      source: 'confirmedRequest',
+      readbackSupported: false,
+      settings: { effort: 'high' },
+    },
+  };
+  service.results.set('updateThreadSettings', result);
+
+  const response = await router.handle({
+    method: 'POST',
+    url: `/codex/v3/threads/${THREAD}/actions`,
+    body: { action: 'settings', params: { effort: 'high' } },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, result);
+});
+
+test('a queue flush recognizes a confirmed thread result from native controls', async () => {
   const queue = new TurnInputQueue();
   const queueCommandCoordinator = new SpyQueueCoordinator();
   const { router, service } = createRouter({ queue, queueCommandCoordinator });
-  service.results.set('startThread', { thread: { id: THREAD } });
+  service.results.set('startThread', {
+    status: 'confirmed',
+    operation: 'thread.start',
+    observation: { threadId: THREAD },
+  });
 
   const created = await router.handle({
     method: 'POST',

@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createDesktopSelectionAdapter } = require('../lib/control/desktop-selection-adapter');
 const { createProtectedThreadGuard } = require('../lib/control/protected-thread-guard');
 const {
   UiActionCircuitBreaker,
@@ -13,7 +14,8 @@ const {
 const { WINDOW_SHOW_STATES } = require('../lib/windows/window-session');
 
 const TEST_THREAD = '11111111-2222-4333-8444-555555555555';
-const PROTECTED_THREAD = '019f4840-00df-7ee0-88cb-e3dbcb1871dc';
+const OTHER_THREAD = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const PROTECTED_THREAD = '9e32d9f0-2f20-4fb6-8b60-3c4d5e6f7081';
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -22,12 +24,13 @@ function clone(value) {
 function createWin32Adapter(options = {}) {
   const targetWindow = 'codex-window';
   let foreground = options.foreground || 'editor-window';
+  let focused = options.focused || 'editor-input';
   const placements = new Map([[targetWindow, clone(options.placement || {
     showState: WINDOW_SHOW_STATES.MINIMIZED,
     flags: 0,
     normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 },
   })]]);
-  const validWindows = new Set(['editor-window', targetWindow]);
+  const validWindows = new Set(['editor-window', 'editor-input', 'codex-input', targetWindow]);
   const events = [];
 
   return {
@@ -47,6 +50,10 @@ function createWin32Adapter(options = {}) {
       events.push({ type: 'getForegroundWindow', handle: foreground });
       return foreground;
     },
+    getFocusedWindow() {
+      events.push({ type: 'getFocusedWindow', handle: focused });
+      return focused;
+    },
     getWindowPlacement(handle) {
       events.push({ type: 'getWindowPlacement', handle });
       return clone(placements.get(handle));
@@ -58,12 +65,18 @@ function createWin32Adapter(options = {}) {
     activateWindow(handle) {
       events.push({ type: 'activateWindow', handle });
       foreground = handle;
+      focused = 'codex-input';
       const placement = placements.get(handle);
       placements.set(handle, { ...clone(placement), showState: WINDOW_SHOW_STATES.NORMAL });
     },
     setForegroundWindow(handle) {
       events.push({ type: 'setForegroundWindow', handle });
       foreground = handle;
+    },
+    setFocusedWindow(handle) {
+      events.push({ type: 'setFocusedWindow', handle });
+      focused = handle;
+      return true;
     },
     isWindow(handle) {
       return validWindows.has(handle);
@@ -74,6 +87,9 @@ function createWin32Adapter(options = {}) {
     },
     currentForeground() {
       return foreground;
+    },
+    currentFocus() {
+      return focused;
     },
     targetPlacement() {
       return clone(placements.get(targetWindow));
@@ -270,6 +286,132 @@ test('protected tasks are rejected before discovery, capture, or activation', as
     return true;
   });
   assert.deepEqual(adapter.events, []);
+});
+
+test('explicit task B rejects with 409 before composer mutation when desktop still shows task A', async () => {
+  const adapter = createWin32Adapter();
+  const transaction = createTransaction(adapter, {
+    resolveObservedThread: async () => TEST_THREAD,
+  });
+  let composerInputs = 0;
+  await assert.rejects(transaction.run(context(createExplicitUiIntent({
+    id: 'intent-target-mismatch',
+    action: 'composer.plugin',
+    threadId: OTHER_THREAD,
+  }), {
+    action: 'composer.plugin',
+    threadId: OTHER_THREAD,
+    requireObservedTargetMatch: true,
+  }), async () => {
+    composerInputs += 1;
+  }), error => {
+    assert.equal(error.code, 'THREAD_TARGET_MISMATCH');
+    assert.equal(error.statusCode, 409);
+    return true;
+  });
+  assert.equal(composerInputs, 0, 'no input or click reaches task A');
+  assert.equal(adapter.events.some(event => event.type === 'setFocusedWindow' && event.handle === 'codex-input'), false);
+});
+
+test('explicit task B runs only after exact observed identity confirms task B', async () => {
+  const adapter = createWin32Adapter();
+  const transaction = createTransaction(adapter, {
+    resolveObservedThread: async () => OTHER_THREAD,
+  });
+  let composerInputs = 0;
+  await transaction.run(context(createExplicitUiIntent({
+    id: 'intent-target-confirmed',
+    action: 'composer.plugin',
+    threadId: OTHER_THREAD,
+  }), {
+    action: 'composer.plugin',
+    threadId: OTHER_THREAD,
+    requireObservedTargetMatch: true,
+  }), async () => {
+    composerInputs += 1;
+  });
+  assert.equal(composerInputs, 1);
+});
+
+test('desktop selection transaction permits exact A to B navigation and restores window state', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 12,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 } };
+  const win32 = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  let selectedThreadId = TEST_THREAD;
+  let navigationCalls = 0;
+  const transaction = createTransaction(win32, {
+    resolveObservedThread: async () => selectedThreadId,
+  });
+  const selection = createDesktopSelectionAdapter({
+    observeSource: async () => ({ route: `codex://threads/${selectedThreadId}` }),
+    navigate: async ({ threadId }) => {
+      navigationCalls += 1;
+      selectedThreadId = threadId;
+    },
+    transaction,
+    createIntent: createExplicitUiIntent,
+    createSourceToken: () => 'selection-a-to-b',
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(await selection.openDesktopThread(OTHER_THREAD), {
+    status: 'confirmed', requestedThreadId: OTHER_THREAD, observedThreadId: OTHER_THREAD,
+  });
+  assert.equal(navigationCalls, 1);
+  assert.deepEqual(win32.targetPlacement(), originalPlacement);
+  assert.equal(win32.currentForeground(), 'editor-window');
+  assert.equal(win32.currentFocus(), 'editor-input');
+});
+
+test('protected desktop selection target is rejected before discovery or navigation', async () => {
+  const win32 = createWin32Adapter();
+  let navigationCalls = 0;
+  const transaction = createTransaction(win32, {
+    guard: createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] }),
+    resolveObservedThread: async () => TEST_THREAD,
+  });
+  const selection = createDesktopSelectionAdapter({
+    observeSource: async () => ({ route: `codex://threads/${TEST_THREAD}` }),
+    navigate: async () => { navigationCalls += 1; },
+    transaction,
+    createIntent: createExplicitUiIntent,
+    createSourceToken: () => 'selection-protected',
+  });
+
+  await assert.rejects(selection.openDesktopThread(PROTECTED_THREAD), error => error.code === 'PROTECTED_THREAD');
+  assert.equal(navigationCalls, 0);
+  assert.deepEqual(win32.events, []);
+});
+
+test('desktop selection post-confirmation mismatch returns conflict state and restores window state', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 13,
+    normalPosition: { left: 100, top: 60, right: 1300, bottom: 860 } };
+  const win32 = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  let now = 0;
+  const transaction = createTransaction(win32, {
+    resolveObservedThread: async () => TEST_THREAD,
+  });
+  const selection = createDesktopSelectionAdapter({
+    observeSource: async () => ({ route: `codex://threads/${TEST_THREAD}` }),
+    navigate: async () => {},
+    transaction,
+    createIntent: createExplicitUiIntent,
+    createSourceToken: () => 'selection-mismatch',
+    now: () => now,
+    sleep: async milliseconds => { now += milliseconds; },
+    confirmationTimeoutMs: 20,
+    confirmationPollIntervalMs: 10,
+  });
+
+  assert.deepEqual(await selection.openDesktopThread(OTHER_THREAD), {
+    status: 'uncertain',
+    requestedThreadId: OTHER_THREAD,
+    observedThreadId: TEST_THREAD,
+    reason: 'desktop_selection_mismatch',
+  });
+  assert.deepEqual(win32.targetPlacement(), originalPlacement);
+  assert.equal(win32.currentForeground(), 'editor-window');
+  assert.equal(win32.currentFocus(), 'editor-input');
 });
 
 test('background actions cannot enter or consume an explicit UI transaction', async () => {
@@ -597,6 +739,26 @@ test('minimized explicit UI action activates before resolving the observed task 
   assert.equal(operationRan, true);
   assert.deepEqual(adapter.targetPlacement(), originalPlacement);
   assert.equal(adapter.currentForeground(), 'editor-window');
+  assert.equal(adapter.currentFocus(), 'editor-input');
+});
+
+test('successful explicit action restores focused HWND, foreground, and minimized placement', async () => {
+  const originalPlacement = {
+    showState: WINDOW_SHOW_STATES.MINIMIZED,
+    flags: 2,
+    showCmd: 2,
+    minimized: true,
+    normalPosition: { left: 90, top: 70, right: 1190, bottom: 770 },
+  };
+  const adapter = createWin32Adapter({ placement: originalPlacement, focused: 'editor-input' });
+  const transaction = createTransaction(adapter);
+  await transaction.run(context(createExplicitUiIntent({
+    id: 'intent-focus-restore', action: 'composer.plus', threadId: TEST_THREAD,
+  })), async () => 'done');
+  assert.equal(adapter.currentForeground(), 'editor-window');
+  assert.equal(adapter.currentFocus(), 'editor-input');
+  assert.deepEqual(adapter.targetPlacement(), originalPlacement);
+  assert.equal(adapter.events.some(event => event.type === 'setFocusedWindow'), true);
 });
 
 test('read-only explicit UI action skips task identity guard and restores minimized state and focus', async () => {
