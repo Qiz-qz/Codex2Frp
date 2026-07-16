@@ -53,6 +53,7 @@ const {
   mergeConfirmedControlOverrides,
   matchingOverridesForThread,
   overrideIsFresh,
+  preferConfirmedControlValue,
 } = require('./lib/control/confirmed-control-override');
 const { createCdpBoundThreadNavigator } = require('./lib/control/cdp-bound-thread-navigation');
 const {
@@ -85,6 +86,7 @@ const { createProductionQueueStore } = require('./lib/queue/queue-store');
 const { TurnInputQueue } = require('./lib/queue/turn-input-queue');
 const { redactDiagnosticString } = require('./lib/diagnostics/diagnostic-report');
 const { parseUserMessageEnvelope } = require('./lib/events/user-message-envelope');
+const { isStrictInternalUserContext } = require('./lib/events/internal-environment-context');
 const { assertExactThreadBeforeSideEffect } = require('./lib/control/thread-side-effect-guard');
 const {
   mergeAdjacentUserHistoryMessage: mergeHistoryUserPair,
@@ -200,6 +202,8 @@ const REASONING_MODE_TARGETS = {
   medium: { key: 'medium', value: 'medium', label: '中', displayName: '中' },
   high: { key: 'high', value: 'high', label: '高', displayName: '高' },
   xhigh: { key: 'xhigh', value: 'xhigh', label: '超高', displayName: '超高' },
+  max: { key: 'max', value: 'max', label: '最大', displayName: '最大' },
+  ultra: { key: 'ultra', value: 'ultra', label: '超强', displayName: '超强' },
 };
 const SPEED_MODE_TARGETS = {
   standard: { key: 'standard', value: 'default', serviceTier: 'default', label: '标准', displayName: '标准' },
@@ -502,6 +506,7 @@ const desktopInternalRpcAdapter = new DesktopInternalRpcAdapter({
   hostId: process.env.CODEX2FRP_DESKTOP_HOST_ID || 'local',
   timeoutMs: CODEX_CDP_SEND_TIMEOUT_MS,
   beforeInvoke: () => desktopServerRequestBridge.synchronize(),
+  normalizeSettings: params => modelOptionUtils.canonicalizeThreadSettings(params, availableModelOptionsForSwitch()),
   onSettingsConfirmed: writeConfirmedControlSettings,
 });
 const desktopControlRuntime = new DesktopControlRuntime({
@@ -785,15 +790,21 @@ function writeAppState(state) {
 }
 
 function writeControlOverride(kind, value, threadId = '') {
+  if (!isCodexThreadId(threadId)) {
+    const error = new Error('A valid Codex thread id is required for a control confirmation.');
+    error.code = 'BAD_THREAD_ID';
+    error.status = 400;
+    throw error;
+  }
   const state = readAppState();
-  const next = {
-    ...(state.controlOverrides || {}),
-    updatedAt: new Date().toISOString(),
+  const updatedAt = new Date().toISOString();
+  const settings = {
+    threadId,
   };
-  if (isCodexThreadId(threadId)) next.threadId = threadId;
-  if (kind === 'model') next.model = String(value || '').trim();
-  if (kind === 'reasoning') next.reasoning = String(value || '').trim();
-  if (kind === 'speed') next.speed = String(value || '').trim();
+  if (kind === 'model') settings.model = String(value || '').trim();
+  if (kind === 'reasoning') settings.effort = String(value || '').trim();
+  if (kind === 'speed') settings.speed = String(value || '').trim();
+  const next = mergeConfirmedControlOverrides(state.controlOverrides, settings, updatedAt);
   state.controlOverrides = next;
   return writeAppState(state).controlOverrides;
 }
@@ -820,7 +831,8 @@ function writeConfirmedControlSettings(params = {}) {
   const persisted = writeAppState(state).controlOverrides;
   const liveModeOptions = cachedLiveModeOptions();
   const targetModel = model ? controlOverrideModel(persisted, {}, liveModeOptions) : null;
-  const targetReasoningMode = effort ? controlOverrideReasoning(persisted, {}, liveModeOptions) : null;
+  const persistedModel = targetModel || controlOverrideModel(persisted, {}, liveModeOptions);
+  const targetReasoningMode = effort ? controlOverrideReasoning(persisted, {}, liveModeOptions, persistedModel) : null;
   const targetSpeedMode = speed ? controlOverrideSpeed(persisted, {}) : null;
   return {
     source: 'desktopInternalRpc',
@@ -845,17 +857,25 @@ function controlOverrideModel(overrides = {}, parsed = {}, liveModeOptions = cac
   });
 }
 
-function controlOverrideReasoning(overrides = {}, parsed = {}, liveModeOptions = cachedLiveModeOptions()) {
+function controlOverrideReasoning(overrides = {}, parsed = {}, liveModeOptions = cachedLiveModeOptions(), model = {}) {
   return confirmedReasoningOverride(overrides, {
     parsedUpdatedAt: parsed.updatedAt || '',
     liveModeOptions,
-    fallbackOptions: Object.values(REASONING_MODE_TARGETS),
+    fallbackOptions: modelOptionUtils.reasoningOptionsForModel(model, REASONING_MODE_TARGETS),
   });
 }
 
+function reasoningOptionsForCurrentModel(model = {}, liveModeOptions = null) {
+  const liveOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions)
+    ? liveModeOptions.reasoningOptions
+    : [];
+  return modelOptionUtils.reasoningOptionsForModel(model, REASONING_MODE_TARGETS, liveOptions);
+}
+
 function controlOverrideSpeed(overrides = {}, parsed = {}) {
-  if (!overrides.speed || !controlOverrideIsFresh(overrides, parsed.updatedAt || '')) return null;
-  const mode = speedModeFromValue(overrides.speed, overrides.updatedAt);
+  const updatedAt = String(overrides.speedUpdatedAt || overrides.updatedAt || '').trim();
+  if (!overrides.speed || !overrideIsFresh(overrides, parsed.updatedAt || '', { updatedAt })) return null;
+  const mode = speedModeFromValue(overrides.speed, updatedAt);
   return mode && mode.available ? mode : null;
 }
 
@@ -906,6 +926,15 @@ function extractMessageText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content.map(item => item && (item.text || item.message || '')).filter(Boolean).join('\n');
+}
+
+function extractPublicUserHistoryText(content) {
+  if (typeof content === 'string') return isStrictInternalUserContext(content) ? '' : content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map(item => item && (item.text || item.message || ''))
+    .filter(text => text && !isStrictInternalUserContext(text))
+    .join('\n');
 }
 
 function normalizeHistoryText(value) {
@@ -1187,12 +1216,15 @@ function resolveFailureTextForTurn(threadId, options = {}) {
 function cleanUserHistoryText(value) {
   const goalText = extractGoalObjectiveText(value);
   const text = normalizeHistoryText(goalText || value);
+  if (isStrictInternalUserContext(text)) return '';
   return normalizeHistoryText(parseUserMessageEnvelope(text).text);
 }
 
 function isInternalCodexTitleText(value) {
-  const text = normalizeHistoryText(value).trim().toLowerCase();
+  const normalized = normalizeHistoryText(value).trim();
+  const text = normalized.toLowerCase();
   if (!text) return true;
+  if (isStrictInternalUserContext(normalized)) return true;
   return /^<(?:environment_context|turn_aborted|codex_internal_context|system_context|developer_context)\b/.test(text);
 }
 
@@ -2014,8 +2046,8 @@ function extractUserHistoryMessage(item) {
   }
   if (item?.type !== 'response_item' || payload.role !== 'user') return null;
   let rawText = '';
-  if (payload.type === 'message' && payload.role === 'user') rawText = extractMessageText(payload.content);
-  else rawText = payload.message || payload.text || extractMessageText(payload.content);
+  if (payload.type === 'message' && payload.role === 'user') rawText = extractPublicUserHistoryText(payload.content);
+  else rawText = payload.message || payload.text || extractPublicUserHistoryText(payload.content);
   const objectiveText = extractGoalObjectiveText(rawText);
   const envelope = parseUserMessageEnvelope(objectiveText || rawText);
   const text = cleanUserHistoryText(envelope.text);
@@ -3037,7 +3069,8 @@ function reasoningModeFromValue(value = '', updatedAt = '') {
     'x-high': 'xhigh',
     'extra-high': 'xhigh',
     extreme: 'xhigh',
-    max: 'xhigh',
+    max: 'max',
+    ultra: 'ultra',
     '超高': 'xhigh',
     '极高': 'xhigh',
   };
@@ -3416,9 +3449,7 @@ function parseCodexStatus(options = {}) {
   };
   const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
   const modelOptions = modelOptionsForClient(liveModeOptions);
-  const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
-    ? liveModeOptions.reasoningOptions
-    : Object.values(REASONING_MODE_TARGETS);
+  const reasoningOptions = reasoningOptionsForCurrentModel(currentModel, liveModeOptions);
   const speedOptions = resolveLiveSpeedOptions(speedSupported, currentSpeed, liveModeOptions);
   const threadId = threadIdFromSessionFile(file);
   const failed = completed && !final && (emptyComplete || Boolean(failureText));
@@ -3477,6 +3508,10 @@ async function handleCodexStatus(req, res) {
     const requestedThreadId = url.searchParams.get('thread') || '';
     const nextTurnSettings = await readLiveCodexComposerModeState({ threadId: requestedThreadId });
     const liveModeOptions = cachedLiveModeOptions();
+    const matchingControlOverrides = matchingOverridesForThread(readAppState().controlOverrides || {}, requestedThreadId);
+    const confirmedModel = controlOverrideModel(matchingControlOverrides, {}, liveModeOptions);
+    const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {}, liveModeOptions, confirmedModel);
+    const confirmedSpeed = controlOverrideSpeed(matchingControlOverrides, {});
     const status = attachForegroundNotice(enrichStatusAttachments(parseCodexStatus({
       since: url.searchParams.get('since') || '',
       sessionFile: url.searchParams.get('session') || '',
@@ -3487,6 +3522,25 @@ async function handleCodexStatus(req, res) {
       nextTurnSettings,
       liveModeOptions,
     }), req));
+    status.currentModel = preferConfirmedControlValue(
+      confirmedModel, status.currentModel, {
+        observedAt: nextTurnSettings.observedAt,
+        observationSource: nextTurnSettings.source,
+      },
+    ) || status.currentModel;
+    status.currentReasoning = preferConfirmedControlValue(
+      confirmedReasoning, status.currentReasoning, {
+        observedAt: nextTurnSettings.observedAt,
+        observationSource: nextTurnSettings.source,
+      },
+    ) || status.currentReasoning;
+    status.currentSpeed = preferConfirmedControlValue(
+      confirmedSpeed, status.currentSpeed, {
+        observedAt: nextTurnSettings.observedAt,
+        observationSource: nextTurnSettings.source,
+      },
+    ) || status.currentSpeed;
+    status.reasoningOptions = reasoningOptionsForCurrentModel(status.currentModel, liveModeOptions);
     return json(res, 200, status);
   } catch (error) {
     return json(res, 500, { ok: false, code: 'CODEX_STATUS_FAILED', message: '读取 Codex 回复状态失败。', detail: String(error && error.message || error) });
@@ -5766,7 +5820,9 @@ async function readCodexModeOptionsViaCdp() {
     await closeCodexCdpMenus(client);
     return {
       modelOptions: modelOptionsForClient({ modelOptions }),
-      reasoningOptions: reasoningOptions.length ? reasoningOptions : Object.values(REASONING_MODE_TARGETS),
+      reasoningOptions: reasoningOptions.length
+        ? reasoningOptions
+        : modelOptionUtils.reasoningOptionsForModel({}, REASONING_MODE_TARGETS),
       speedOptions,
       updatedAt: new Date().toISOString(),
       source: 'codex-cdp-menu',
@@ -8230,28 +8286,35 @@ async function handleClientConfig(req, res) {
   const controlOverrides = readAppState().controlOverrides || {};
   const matchingControlOverrides = matchingOverridesForThread(controlOverrides, requestedThreadId);
   const confirmedModel = controlOverrideModel(matchingControlOverrides, {}, liveModeOptions);
-  const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {}, liveModeOptions);
+  const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {}, liveModeOptions, confirmedModel);
   const confirmedSpeed = controlOverrideSpeed(matchingControlOverrides, {});
-  const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
-    ? nextTurnSettings.model
-    : confirmedModel
-      ? { ...confirmedModel, source: 'confirmed-request' }
-      : modelInfoFromId('');
-  const currentReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
-    ? nextTurnSettings.reasoningMode
-    : confirmedReasoning
-      ? { ...confirmedReasoning, source: 'confirmed-request' }
-      : reasoningModeFromValue('');
-  const currentSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
-    ? nextTurnSettings.speed
-    : confirmedSpeed
-      ? { ...confirmedSpeed, source: 'confirmed-request' }
-      : speedModeFromValue('');
+  const observedModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
+    ? nextTurnSettings.model : null;
+  const observedReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
+    ? nextTurnSettings.reasoningMode : null;
+  const observedSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
+    ? nextTurnSettings.speed : null;
+  const currentModel = preferConfirmedControlValue(
+    confirmedModel, observedModel, {
+      observedAt: nextTurnSettings.observedAt,
+      observationSource: nextTurnSettings.source,
+    },
+  ) || modelInfoFromId('');
+  const currentReasoning = preferConfirmedControlValue(
+    confirmedReasoning, observedReasoning, {
+      observedAt: nextTurnSettings.observedAt,
+      observationSource: nextTurnSettings.source,
+    },
+  ) || reasoningModeFromValue('');
+  const currentSpeed = preferConfirmedControlValue(
+    confirmedSpeed, observedSpeed, {
+      observedAt: nextTurnSettings.observedAt,
+      observationSource: nextTurnSettings.source,
+    },
+  ) || speedModeFromValue('');
   const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
   const modelOptions = modelOptionsForClient(liveModeOptions);
-  const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
-    ? liveModeOptions.reasoningOptions
-    : Object.values(REASONING_MODE_TARGETS);
+  const reasoningOptions = reasoningOptionsForCurrentModel(currentModel, liveModeOptions);
   const speedOptions = resolveLiveSpeedOptions(speedSupported, currentSpeed, liveModeOptions);
   const localRoutes = [
     { id: 'desktop-local', kind: 'desktop-local', label: '本机', baseUrl: getDesktopLocalBase(PORT), priority: 0 },

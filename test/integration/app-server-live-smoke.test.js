@@ -631,7 +631,7 @@ test('authenticated v3 HTTP creates, queues, and immediately starts an isolated 
     body: {},
   });
 
-  assert.equal(flushed.statusCode, 200, stderr);
+  assert.equal(flushed.statusCode, 200, `${JSON.stringify(flushed.body)}\n${stderr}`);
   assert.ok(flushed.body.item, `${JSON.stringify(flushed.body)}\n${stderr}`);
   assert.equal(flushed.body.item.state, 'accepted');
   assert.ok(flushed.body.item.turnId);

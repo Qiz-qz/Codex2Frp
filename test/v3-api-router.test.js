@@ -1147,8 +1147,10 @@ test('a queue flush recognizes a confirmed thread result from native controls', 
   assert.equal(queued.statusCode, 202);
 
   const notMaterialized = new Error('Invalid request: thread is not materialized yet');
-  notMaterialized.code = 'APP_SERVER_RPC_ERROR';
-  notMaterialized.rpcCode = -32602;
+  notMaterialized.code = 'DESKTOP_RPC_ERROR';
+  notMaterialized.details = {
+    rpcError: { code: -32600, message: 'thread is not materialized yet' },
+  };
   service.results.set('readThread', notMaterialized);
   service.results.set('startTurn', { turn: { id: 'first-turn' } });
 

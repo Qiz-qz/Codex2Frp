@@ -612,6 +612,46 @@ test('normalizer rejects only a strict Codex environment injection at the source
   }
 });
 
+test('normalizer removes desktop-hidden bootstrap parts without hiding the real user message', () => {
+  const normalizer = createNormalizer({ session: { isSubagent: false } });
+  const recommendedPlugins = [
+    '<recommended_plugins>',
+    'Here is a list of plugins that are available but not installed.',
+    '- Example (example@openai-curated-remote)',
+    '</recommended_plugins>',
+  ].join('\n');
+  const agentsInstructions = [
+    '# AGENTS.md instructions for E:\\workspace',
+    '',
+    '<INSTRUCTIONS>',
+    '# Local execution safety',
+    'Do not mutate the active task.',
+    '</INSTRUCTIONS>',
+  ].join('\n');
+  const internalEnvironment = [
+    '<environment_context>',
+    '  <cwd>E:/workspace</cwd>',
+    '  <shell>powershell</shell>',
+    '  <current_date>2026-07-17</current_date>',
+    '  <timezone>Asia/Shanghai</timezone>',
+    '  <filesystem><workspace_roots><root>E:/workspace</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>',
+    '</environment_context>',
+  ].join('\n');
+  const event = normalizer.normalize(sessionItem('response_item', {
+    type: 'message', role: 'user',
+    content: [
+      { type: 'input_text', text: recommendedPlugins },
+      { type: 'input_text', text: agentsInstructions },
+      { type: 'input_text', text: internalEnvironment },
+      { type: 'input_text', text: 'Reply exactly VISIBLE_USER_MESSAGE.' },
+    ],
+    internal_chat_message_metadata_passthrough: { turn_id: 'turn-bootstrap-filter' },
+  }));
+  assert.equal(event.text, 'Reply exactly VISIBLE_USER_MESSAGE.');
+  assert.equal(JSON.stringify(event).includes('recommended_plugins'), false);
+  assert.equal(JSON.stringify(event).includes('AGENTS.md instructions'), false);
+});
+
 test('turn reducer distinguishes active-turn steer, next-turn queue, and idle input', () => {
   const normalizer = createNormalizer();
   normalizer.normalize(sessionItem('event_msg', { type: 'task_started', turn_id: 'turn-main' }));

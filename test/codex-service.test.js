@@ -453,6 +453,13 @@ test('error classification is stable for compatibility, guard, RPC, and uncertai
     'failed to unarchive session: thread-store internal error: failed to read unarchived thread',
     { rpcCode: -32603 },
   );
+  const rendererWrappedInvalidRequest = Object.assign(
+    new Error('thread is not materialized yet'),
+    {
+      code: 'DESKTOP_RPC_ERROR',
+      details: { rpcError: { code: -32600, message: 'thread is not materialized yet' } },
+    },
+  );
 
   assert.deepEqual(classifyCodexServiceError(methodMissing), {
     kind: ERROR_KINDS.UNAVAILABLE,
@@ -488,5 +495,12 @@ test('error classification is stable for compatibility, guard, RPC, and uncertai
     rpcCode: -32603,
     retryable: false,
     uncertain: true,
+  });
+  assert.deepEqual(classifyCodexServiceError(rendererWrappedInvalidRequest), {
+    kind: ERROR_KINDS.INVALID_REQUEST,
+    code: 'DESKTOP_RPC_ERROR',
+    rpcCode: -32600,
+    retryable: false,
+    uncertain: false,
   });
 });

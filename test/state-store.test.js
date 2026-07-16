@@ -92,6 +92,9 @@ test('normalizes persisted Codex control overrides', () => {
       speed: 'fast',
       threadId: 'test-thread-a',
       updatedAt: '2026-06-18T00:00:00.000Z',
+      modelUpdatedAt: '2026-06-18T00:00:01.000Z',
+      reasoningUpdatedAt: '2026-06-18T00:00:02.000Z',
+      speedUpdatedAt: '2026-06-18T00:00:03.000Z',
       extra: 'ignored'
     }
   });
@@ -101,7 +104,10 @@ test('normalizes persisted Codex control overrides', () => {
     reasoning: 'high',
     speed: 'fast',
     threadId: 'test-thread-a',
-    updatedAt: '2026-06-18T00:00:00.000Z'
+    updatedAt: '2026-06-18T00:00:00.000Z',
+    modelUpdatedAt: '2026-06-18T00:00:01.000Z',
+    reasoningUpdatedAt: '2026-06-18T00:00:02.000Z',
+    speedUpdatedAt: '2026-06-18T00:00:03.000Z'
   });
 
   const malformed = normalizeState({
@@ -117,8 +123,29 @@ test('normalizes persisted Codex control overrides', () => {
     reasoning: '',
     speed: '',
     threadId: '',
-    updatedAt: ''
+    updatedAt: '',
+    modelUpdatedAt: '',
+    reasoningUpdatedAt: '',
+    speedUpdatedAt: ''
   });
+});
+
+test('legacy control timestamps migrate per field and max or ultra remain exact', () => {
+  const legacy = normalizeState({
+    controlOverrides: {
+      threadId: 'test-thread-a', model: 'gpt-5.6-sol', reasoning: 'max',
+      updatedAt: '2026-06-18T00:00:00.000Z',
+    },
+  });
+  assert.equal(legacy.controlOverrides.modelUpdatedAt, legacy.controlOverrides.updatedAt);
+  assert.equal(legacy.controlOverrides.reasoningUpdatedAt, legacy.controlOverrides.updatedAt);
+  assert.equal(legacy.controlOverrides.speedUpdatedAt, '');
+  assert.equal(legacy.controlOverrides.reasoning, 'max');
+
+  const ultra = normalizeState({ controlOverrides: {
+    threadId: 'test-thread-a', reasoning: 'ultra', updatedAt: '2026-06-18T00:00:00.000Z',
+  } });
+  assert.equal(ultra.controlOverrides.reasoning, 'ultra');
 });
 
 test('sanitized Sakura config is based on manual route fields only', () => {

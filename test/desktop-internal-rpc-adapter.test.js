@@ -128,6 +128,27 @@ test('desktop settings persist one confirmed target only after the renderer RPC 
   });
 });
 
+test('desktop settings normalize model identity before both RPC and confirmation persistence', async () => {
+  const requests = [];
+  const confirmations = [];
+  const adapter = new DesktopInternalRpcAdapter({
+    normalizeSettings: params => ({ ...params, model: 'gpt-5.6-sol' }),
+    evaluate: async expression => {
+      requests.push(JSON.parse(expression.match(/const request = (\{.*?\});\s*const timeoutMs/s)[1]));
+      return { ok: true, result: { accepted: true } };
+    },
+    onSettingsConfirmed: async params => {
+      confirmations.push(params);
+      return { source: 'desktopInternalRpc', settings: params };
+    },
+  });
+
+  await adapter.updateThreadSettings({ threadId: THREAD, model: 'GPT-5.6-Sol' });
+
+  assert.equal(requests[0].params.model, 'gpt-5.6-sol');
+  assert.equal(confirmations[0].model, 'gpt-5.6-sol');
+});
+
 test('desktop settings never persist a confirmation when the renderer RPC fails', async () => {
   let confirmations = 0;
   const adapter = new DesktopInternalRpcAdapter({
