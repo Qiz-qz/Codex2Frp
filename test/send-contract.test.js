@@ -242,6 +242,19 @@ test('plus menu insertion is verified and can be removed from the Codex composer
   assert.doesNotMatch(actionBody, /case 'plus-menu-item'[\s\S]{0,360}message:\s*`\$\{target\} opened in Codex\.`/, 'insert action does not claim success merely because a menu row was clicked');
 });
 
+test('native first send selects the exact created task in the desktop renderer', () => {
+  const sendBody = functionBody('handleSend');
+  const directSend = sendBody.indexOf('desktopInternalRpcAdapter.send');
+  const exactSelection = sendBody.indexOf('desktopSelectionAdapter.openDesktopThread(direct.threadId)');
+  const response = sendBody.indexOf('desktopSelection,');
+  assert.ok(directSend >= 0 && exactSelection > directSend,
+    'desktop selection follows the native thread and turn creation result');
+  assert.ok(response > exactSelection,
+    'the send response reports exact desktop navigation without hiding delivery success');
+  assert.match(sendBody, /if \(direct\.createdThread === true\)/,
+    'existing-task sends do not perform an unnecessary desktop navigation');
+});
+
 test('thread-scoped model, reasoning, and speed mutations exact-confirm the requested composer first', () => {
   for (const name of ['switchCodexGuiModel', 'switchCodexReasoningMode', 'switchCodexSpeedMode']) {
     const body = functionBody(name);
@@ -530,6 +543,17 @@ test('status parsing expands beyond the small tail for long active turns', () =>
   assert.match(functionBody('readStatusLinesAdaptive'), /statusTailNeedsExpansion/, 'status reader checks whether the small tail lost the active turn boundary');
   assert.match(functionBody('parseCodexStatus'), /readStatusLinesAdaptive\(file,\s*\{\s*sinceMs\s*\}\)/, 'status parser uses adaptive lines instead of a fixed 5MB tail');
   assert.doesNotMatch(functionBody('parseCodexStatus'), /for \(const line of readTailLines\(file\)\)/, 'status parser no longer depends only on the fixed small tail');
+});
+
+test('new-thread status discovery cannot bind a protected desktop task', () => {
+  const finderBody = functionBody('findLatestCodexSessionFile');
+  const statusBody = functionBody('parseCodexStatus');
+  assert.match(finderBody, /typeof options\.excludeThread === 'function'/,
+    'session discovery accepts an explicit task exclusion predicate');
+  assert.match(finderBody, /excludeThread\(threadId\)/,
+    'session discovery applies the predicate before considering a candidate');
+  assert.match(statusBody, /options\.expectNewThread[\s\S]*threadProtectionRegistry\.isProtected\(threadId\)/,
+    'new-thread watches exclude every protected task from generic session discovery');
 });
 
 test('process image tool calls carry renderable attachment URLs for mobile', () => {

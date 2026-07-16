@@ -16,7 +16,7 @@ This public snapshot corresponds to the internal Codex2Frp 2.4.3 capability line
 - Passes the CDP-bound process id into native window enumeration so unrelated HWNDs are rejected before process-name and title inspection, with process-name caching retained for unbound discovery.
 - Bridges current renderer command, file-change, and permission approvals to paired phones with privacy-safe summaries and stale/duplicate-response protection.
 - Persists RPC-confirmed model, reasoning, and service-tier settings atomically per task.
-- Expands the side-effect-free public backend suite to 693 passing tests, including approval lifecycle, confirmed settings, helper caching, corruption recovery, stdin-only requests, strict process-filter validation, and bound-window filtering.
+- Expands the side-effect-free public backend suite to 695 passing tests, including approval lifecycle, confirmed settings, protected-task-safe new-task discovery, exact desktop binding after native task creation, helper caching, corruption recovery, stdin-only requests, strict process-filter validation, and bound-window filtering.
 
 ## [1.4.2] - 2026-07-16
 

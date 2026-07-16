@@ -170,7 +170,7 @@ node --check server.js
 npm run windows:installer
 ```
 
-The current side-effect-free public backend suite contains 693 tests. Coverage includes the native focus helper, renderer approval lifecycle and duplicate-response handling, atomic task-scoped confirmed settings, strict process-id filters, and CDP-bound window discovery.
+The current side-effect-free public backend suite contains 695 tests. Coverage includes the native focus helper, renderer approval lifecycle and duplicate-response handling, atomic task-scoped confirmed settings, protected-task-safe new-task discovery, exact desktop binding after native task creation, strict process-id filters, and CDP-bound window discovery.
 
 The installer build writes:
 
@@ -209,7 +209,7 @@ and update `SHA256SUMS.txt`.
 - Allows an explicitly requested task selection to leave the native home route without inventing a source task, while retaining destination protection checks and window-state restoration.
 - Uses a SHA-256-named native focus helper for cached explicit-control operations, with atomic compilation, bounded corrupt-cache recovery, stdin-only request payloads, and no shell invocation.
 - Filters CDP-bound native window discovery by the verified renderer process before reading unrelated process names or window titles.
-- Passes 693 side-effect-free backend tests for the public v1.4.3 source snapshot.
+- Passes 695 side-effect-free backend tests for the public v1.4.3 source snapshot.
 
 ### v1.4.2
 

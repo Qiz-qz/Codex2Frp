@@ -15,6 +15,6 @@ This backend-only public snapshot corresponds to the internal Codex2Frp 2.4.3 ca
 - Bridges current Codex command, file-change, and permission approval requests through the renderer's native RPC channel so a paired phone can approve or reject them without simulated desktop clicks.
 - Exposes only privacy-safe approval summaries to the phone, reconciles renderer reloads and resolved requests, and rejects stale or duplicate responses.
 - Persists RPC-confirmed model, reasoning, and service-tier settings atomically per task, while failed RPC calls and task switches cannot leak stale settings.
-- Passes all 693 side-effect-free public backend tests, including strict helper input, approval lifecycle, duplicate-response, confirmed-settings, cache recovery, stdin-only transport, process-filter range checks, and bound-window selection coverage.
+- Passes all 695 side-effect-free public backend tests, including strict helper input, approval lifecycle, duplicate-response, confirmed-settings, protected-task-safe new-task discovery, exact desktop binding after native task creation, cache recovery, stdin-only transport, process-filter range checks, and bound-window selection coverage.
 
 Only the Windows backend installer and its SHA-256 checksum are intended as GitHub Release assets. Mobile client packages, signing materials, screenshots, local runtime state, and user data are not included.

@@ -1286,6 +1286,7 @@ function normalizeComparableMessage(value) {
 
 function findLatestCodexSessionFile(options = {}) {
   const excludeThreadId = isCodexThreadId(options.excludeThreadId) ? options.excludeThreadId : '';
+  const excludeThread = typeof options.excludeThread === 'function' ? options.excludeThread : null;
   const afterMs = Number(options.afterMs) || 0;
   const expectedCwd = validLocalDirectory(options.cwd || '');
   const files = listCodexSessionFiles(afterMs ? { force: true } : {});
@@ -1295,6 +1296,7 @@ function findLatestCodexSessionFile(options = {}) {
       const stat = fs.statSync(file);
       const threadId = threadIdFromSessionFile(file);
       if (excludeThreadId && threadId === excludeThreadId) continue;
+      if (excludeThread && excludeThread(threadId)) continue;
       if (afterMs && stat.mtimeMs < afterMs - 2500) continue;
       const meta = readSessionMeta(file);
       if (!shouldIncludeCodexSessionMeta(meta, options)) continue;
@@ -3239,6 +3241,15 @@ function parseCodexStatus(options = {}) {
   const file = requestedFile || (wantsExactSession ? null : findLatestCodexSessionFile({
     afterMs: options.expectNewThread ? sinceMs : 0,
     excludeThreadId: options.excludeThreadId || '',
+    excludeThread: options.expectNewThread
+      ? threadId => {
+        try {
+          return threadProtectionRegistry.isProtected(threadId);
+        } catch {
+          return true;
+        }
+      }
+      : null,
     cwd: options.cwd || '',
   }));
   if (!file) {
@@ -7910,6 +7921,18 @@ async function handleSend(req, res) {
         clientRequestId,
         cwd: expectNewThread ? expectedNewThreadCwd : '',
       });
+      let desktopSelection = null;
+      if (direct.createdThread === true) {
+        try {
+          desktopSelection = await desktopSelectionAdapter.openDesktopThread(direct.threadId);
+        } catch {
+          desktopSelection = {
+            status: 'unavailable',
+            requestedThreadId: direct.threadId,
+            reason: 'desktop_navigation_failed',
+          };
+        }
+      }
       const watch = {
         since: sentAt,
         threadId: direct.threadId,
@@ -7926,6 +7949,7 @@ async function handleSend(req, res) {
         threadId: direct.threadId,
         turnId: direct.turnId,
         createdThread: direct.createdThread,
+        desktopSelection,
         attachments: requestAttachments.map(item => ({
           name: String(item && item.name || ''),
           type: String(item && (item.mimeType || item.mime || item.type) || ''),
