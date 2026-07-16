@@ -12,6 +12,11 @@ This public snapshot corresponds to the internal Codex2Frp 2.4.3 capability line
 - Preserves native plus-button semantics through renderer-bound `windows.show_home`, while immediate `thread/start` receives a dedicated bounded initialization timeout.
 - Lets `thread.openDesktop` leave the native home route without fabricating an active source task; the requested destination remains protected before discovery and again under the global UI lock.
 - Keeps unsupported, mismatched, and unconfirmed navigation or control results fail closed.
+- Replaces per-operation PowerShell startup and C# recompilation with a SHA-256-named native focus helper; requests remain on stdin, cache writes are atomic, and a corrupt helper is rebuilt at most once before failing closed.
+- Passes the CDP-bound process id into native window enumeration so unrelated HWNDs are rejected before process-name and title inspection, with process-name caching retained for unbound discovery.
+- Bridges current renderer command, file-change, and permission approvals to paired phones with privacy-safe summaries and stale/duplicate-response protection.
+- Persists RPC-confirmed model, reasoning, and service-tier settings atomically per task.
+- Expands the side-effect-free public backend suite to 693 passing tests, including approval lifecycle, confirmed settings, helper caching, corruption recovery, stdin-only requests, strict process-filter validation, and bound-window filtering.
 
 ## [1.4.2] - 2026-07-16
 

@@ -411,12 +411,22 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(configBody, /speedOptions/, 'config exposes speed choices to the App');
   assert.doesNotMatch(configBody, /refreshModes|readLiveCodexModeOptionsBounded/, 'config reads never escalate into focus-changing menu automation');
   assert.match(configBody, /cachedLiveModeOptions/, 'ordinary config reads use cached menu choices');
-  assert.match(configBody, /controlOverrides\.threadId === requestedThreadId/,
+  assert.match(configBody, /matchingOverridesForThread\(controlOverrides, requestedThreadId\)/,
     'config reuses a confirmed setting request only for the exact desktop task that received it');
   assert.match(configBody, /source: 'confirmed-request'/,
     'config labels an RPC-confirmed custom setting honestly when the desktop trigger cannot expose its exact value');
   assert.match(configBody, /Boolean\(confirmedModel \|\| confirmedReasoning \|\| confirmedSpeed\)/,
     'a same-task confirmed setting keeps desktop control ready while the trigger displays a generic custom label');
+  assert.match(configBody, /controlOverrideModel\(matchingControlOverrides, \{\}, liveModeOptions\)/,
+    'config resolves confirmed custom models against the already-confirmed live catalog');
+  assert.match(functionBody('handleModelSwitch'), /targetModel[\s\S]*桌面内建 RPC 已确认模型切换/,
+    'model control response exposes immediate confirmed RPC readback and honest UI wording');
+  assert.match(functionBody('handleReasoningMode'), /targetReasoningMode[\s\S]*桌面内建 RPC 已确认推理强度切换/,
+    'reasoning control response exposes immediate confirmed RPC readback and honest UI wording');
+  assert.match(serverSource, /onSettingsConfirmed:\s*writeConfirmedControlSettings/,
+    'all desktop internal RPC settings paths persist their confirmed target through one adapter callback');
+  assert.match(functionBody('writeConfirmedControlSettings'), /state\.controlOverrides\s*=\s*next[\s\S]*writeAppState\(state\)/,
+    'model, reasoning, and service tier confirmation are persisted in one atomic state write');
   assert.match(handleStatusBody, /cachedLiveModeOptions/, 'status polling uses cached menu choices');
   assert.doesNotMatch(handleStatusBody, /await\s+readLiveCodexModeOptions/, 'status polling must not open Codex mode menus');
   assert.match(controlPortResolverBody, /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'explicit control-port setup refreshes live menu choices without blocking indefinitely');

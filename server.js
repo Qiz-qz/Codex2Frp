@@ -45,7 +45,15 @@ const { AppServerRuntime } = require('./lib/app-server/runtime');
 const { PendingRequestStore } = require('./lib/app-server/pending-request-store');
 const { CommandCoordinator } = require('./lib/control/command-coordinator');
 const { DesktopInternalRpcAdapter } = require('./lib/control/desktop-internal-rpc-adapter');
+const { DesktopServerRequestBridge } = require('./lib/control/desktop-server-request-bridge');
 const { DesktopControlRuntime } = require('./lib/control/desktop-control-runtime');
+const {
+  confirmedModelOverride,
+  confirmedReasoningOverride,
+  mergeConfirmedControlOverrides,
+  matchingOverridesForThread,
+  overrideIsFresh,
+} = require('./lib/control/confirmed-control-override');
 const { createCdpBoundThreadNavigator } = require('./lib/control/cdp-bound-thread-navigation');
 const {
   buildShowThreadExpression,
@@ -325,6 +333,26 @@ function handleV3ServerRequest(store, request = {}) {
   return null;
 }
 
+function handleV3Notification(eventRuntime, store, notification = {}) {
+  if (notification.method === 'serverRequest/resolved') {
+    const params = notification.params && typeof notification.params === 'object'
+      ? notification.params
+      : {};
+    store.resolveServerRequest({
+      requestId: params.requestId,
+      threadId: params.threadId,
+      connectionEpoch: notification.connectionEpoch,
+      connectionSource: 'independentAppServer',
+    });
+  }
+  return eventRuntime.ingestRpcNotification(notification);
+}
+
+function handleV3ServerRequestLifecycle(store, event = {}) {
+  if (event.type !== 'connectionClosed') return 0;
+  return store.expireConnectionEpoch(event.connectionEpoch, 'independentAppServer');
+}
+
 function createV3Bridge() {
   const executable = discoverCodexExecutable();
   const cliVersion = detectCodexCliVersion(executable);
@@ -407,8 +435,9 @@ function createV3Bridge() {
       backendVersion: String(packageInfo.version || ''),
       desktopVersion: String(process.env.CODEX2FRP_CODEX_DESKTOP_VERSION || ''),
       cliVersion,
-      notificationSink: notification => eventRuntime.ingestRpcNotification(notification),
+      notificationSink: notification => handleV3Notification(eventRuntime, pendingRequestStore, notification),
       serverRequestSink: request => handleV3ServerRequest(pendingRequestStore, request),
+      serverRequestLifecycleSink: event => handleV3ServerRequestLifecycle(pendingRequestStore, event),
       bridgeOperations: ['turn.queueNext'],
       uiExplicitOperations: ['composer.plus'],
     });
@@ -459,11 +488,21 @@ function createV3Bridge() {
 }
 
 const v3BridgeBase = createV3Bridge();
+const desktopServerRequestBridge = new DesktopServerRequestBridge({
+  evaluate: evaluateCodexDesktopInternalRpc,
+  store: v3BridgeBase.pendingRequestStore,
+  hostId: process.env.CODEX2FRP_DESKTOP_HOST_ID || 'local',
+});
+v3BridgeBase.pendingRequestStore.setSynchronizer(
+  () => desktopServerRequestBridge.synchronize(),
+);
 const desktopInternalRpcAdapter = new DesktopInternalRpcAdapter({
   evaluate: evaluateCodexDesktopInternalRpc,
   guard: v3BridgeBase.guard,
   hostId: process.env.CODEX2FRP_DESKTOP_HOST_ID || 'local',
   timeoutMs: CODEX_CDP_SEND_TIMEOUT_MS,
+  beforeInvoke: () => desktopServerRequestBridge.synchronize(),
+  onSettingsConfirmed: writeConfirmedControlSettings,
 });
 const desktopControlRuntime = new DesktopControlRuntime({
   independentRuntime: v3BridgeBase.runtime,
@@ -760,23 +799,58 @@ function writeControlOverride(kind, value, threadId = '') {
 }
 
 function controlOverrideIsFresh(overrides = {}, parsedUpdatedAt = '') {
-  const overrideMs = Date.parse(overrides.updatedAt || '');
-  const parsedMs = Date.parse(parsedUpdatedAt || '');
-  if (!Number.isFinite(overrideMs)) return false;
-  if (!Number.isFinite(parsedMs)) return true;
-  return overrideMs >= parsedMs;
+  return overrideIsFresh(overrides, parsedUpdatedAt);
 }
 
-function controlOverrideModel(overrides = {}, parsed = {}) {
-  if (!overrides.model || !controlOverrideIsFresh(overrides, parsed.updatedAt || '')) return null;
-  const model = modelInfoFromId(overrides.model, overrides.updatedAt);
-  return model && model.available ? model : null;
+function writeConfirmedControlSettings(params = {}) {
+  const threadId = String(params.threadId || '').trim();
+  if (!isCodexThreadId(threadId)) return null;
+  const state = readAppState();
+  const model = String(params.model || '').trim();
+  const effort = String(params.effort || '').trim();
+  const serviceTier = String(params.serviceTier || params.service_tier || '').trim();
+  const speed = serviceTier ? speedModeFromValue(serviceTier) : null;
+  const next = mergeConfirmedControlOverrides(state.controlOverrides, {
+    threadId,
+    model,
+    effort,
+    speed: speed && speed.key,
+  }, new Date().toISOString());
+  state.controlOverrides = next;
+  const persisted = writeAppState(state).controlOverrides;
+  const liveModeOptions = cachedLiveModeOptions();
+  const targetModel = model ? controlOverrideModel(persisted, {}, liveModeOptions) : null;
+  const targetReasoningMode = effort ? controlOverrideReasoning(persisted, {}, liveModeOptions) : null;
+  const targetSpeedMode = speed ? controlOverrideSpeed(persisted, {}) : null;
+  return {
+    source: 'desktopInternalRpc',
+    threadId,
+    updatedAt: persisted.updatedAt,
+    settings: {
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+      ...(serviceTier ? { serviceTier } : {}),
+    },
+    ...(targetModel ? { model: targetModel } : {}),
+    ...(targetReasoningMode ? { reasoningMode: targetReasoningMode } : {}),
+    ...(targetSpeedMode ? { speedMode: targetSpeedMode } : {}),
+  };
 }
 
-function controlOverrideReasoning(overrides = {}, parsed = {}) {
-  if (!overrides.reasoning || !controlOverrideIsFresh(overrides, parsed.updatedAt || '')) return null;
-  const mode = reasoningModeFromValue(overrides.reasoning, overrides.updatedAt);
-  return mode && mode.available ? mode : null;
+function controlOverrideModel(overrides = {}, parsed = {}, liveModeOptions = cachedLiveModeOptions()) {
+  return confirmedModelOverride(overrides, {
+    parsedUpdatedAt: parsed.updatedAt || '',
+    liveModeOptions,
+    catalogOptions: readModelCatalogOptions(),
+  });
+}
+
+function controlOverrideReasoning(overrides = {}, parsed = {}, liveModeOptions = cachedLiveModeOptions()) {
+  return confirmedReasoningOverride(overrides, {
+    parsedUpdatedAt: parsed.updatedAt || '',
+    liveModeOptions,
+    fallbackOptions: Object.values(REASONING_MODE_TARGETS),
+  });
 }
 
 function controlOverrideSpeed(overrides = {}, parsed = {}) {
@@ -7507,8 +7581,17 @@ async function handleModelSwitch(req, res) {
     }
     const modelId = String(model.id || model.key).trim();
     const rpc = await desktopInternalRpcAdapter.updateThreadSettings({ threadId, model: modelId });
-    writeControlOverride('model', modelId, threadId);
-    return json(res, 200, { ok: true, threadId, model: modelId, rpc, verifiedBy: 'desktop-internal-rpc' });
+    const overrides = matchingOverridesForThread(readAppState().controlOverrides || {}, threadId);
+    const targetModel = controlOverrideModel(overrides, {}, cachedLiveModeOptions());
+    return json(res, 200, {
+      ok: true,
+      threadId,
+      model: modelId,
+      targetModel,
+      rpc,
+      verifiedBy: 'desktop-internal-rpc',
+      message: 'Codex 桌面内建 RPC 已确认模型切换。',
+    });
   } catch (error) {
     const status = Number(error && (error.statusCode || error.status));
     if (status) {
@@ -7542,8 +7625,17 @@ async function handleReasoningMode(req, res) {
       return json(res, 400, { ok: false, code: 'BAD_REASONING_MODE', message: '推理强度不正确。' });
     }
     const rpc = await desktopInternalRpcAdapter.updateThreadSettings({ threadId, effort });
-    writeControlOverride('reasoning', effort, threadId);
-    return json(res, 200, { ok: true, threadId, effort, rpc, verifiedBy: 'desktop-internal-rpc' });
+    const overrides = matchingOverridesForThread(readAppState().controlOverrides || {}, threadId);
+    const targetReasoningMode = controlOverrideReasoning(overrides, {}, cachedLiveModeOptions());
+    return json(res, 200, {
+      ok: true,
+      threadId,
+      effort,
+      targetReasoningMode,
+      rpc,
+      verifiedBy: 'desktop-internal-rpc',
+      message: 'Codex 桌面内建 RPC 已确认推理强度切换。',
+    });
   } catch (error) {
     const status = Number(error && (error.statusCode || error.status));
     if (status) {
@@ -7580,7 +7672,6 @@ async function handleSpeedMode(req, res) {
       threadId,
       serviceTier: speed.serviceTier,
     });
-    writeControlOverride('speed', speed.key, threadId);
     return json(res, 200, {
       ok: true,
       threadId,
@@ -8111,10 +8202,11 @@ async function handleClientConfig(req, res) {
   const configSpeed = speedModeFromValue(tomlStringValue(configText, 'service_tier'));
   const requestedThreadId = url.searchParams.get('thread') || '';
   const nextTurnSettings = await readLiveCodexComposerModeState({ threadId: requestedThreadId });
+  const liveModeOptions = cachedLiveModeOptions();
   const controlOverrides = readAppState().controlOverrides || {};
-  const matchingControlOverrides = controlOverrides.threadId === requestedThreadId ? controlOverrides : {};
-  const confirmedModel = controlOverrideModel(matchingControlOverrides, {});
-  const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {});
+  const matchingControlOverrides = matchingOverridesForThread(controlOverrides, requestedThreadId);
+  const confirmedModel = controlOverrideModel(matchingControlOverrides, {}, liveModeOptions);
+  const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {}, liveModeOptions);
   const confirmedSpeed = controlOverrideSpeed(matchingControlOverrides, {});
   const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
     ? nextTurnSettings.model
@@ -8132,7 +8224,6 @@ async function handleClientConfig(req, res) {
       ? { ...confirmedSpeed, source: 'confirmed-request' }
       : speedModeFromValue('');
   const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
-  const liveModeOptions = cachedLiveModeOptions();
   const modelOptions = modelOptionsForClient(liveModeOptions);
   const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
     ? liveModeOptions.reasoningOptions

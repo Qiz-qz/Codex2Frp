@@ -13,6 +13,7 @@ This public release corresponds to the feature set developed on the internal Cod
 - Ships a Windows control panel for starting and stopping the local backend, copying access links, saving a remote-link route, opening logs, and enabling Codex control.
 - Uses Codex Desktop through the real UI when sending text or changing model, reasoning, speed, and composer menu actions.
 - Keeps passive `/codex/status` and `/codex/config` polling read-only; those calls do not open Codex menus or launch extra Codex clients.
+- Uses a hash-versioned native Windows focus helper for explicit controls, avoiding repeated PowerShell startup and C# compilation while keeping every operation payload on stdin.
 - Supports local, LAN, and manually configured remote-link routes.
 
 Codex2Frp is not a hosted chat service and does not include a model. It operates your local Codex Desktop session.
@@ -169,6 +170,8 @@ node --check server.js
 npm run windows:installer
 ```
 
+The current side-effect-free public backend suite contains 693 tests. Coverage includes the native focus helper, renderer approval lifecycle and duplicate-response handling, atomic task-scoped confirmed settings, strict process-id filters, and CDP-bound window discovery.
+
 The installer build writes:
 
 ```text
@@ -204,6 +207,9 @@ and update `SHA256SUMS.txt`.
 - Preserves same-task RPC-confirmed model, reasoning, and speed readback when the desktop trigger temporarily reports only a generic custom label.
 - Opens the native Codex home for deferred new-task creation and gives `thread/start` a bounded initialization timeout when immediate materialization is explicitly requested.
 - Allows an explicitly requested task selection to leave the native home route without inventing a source task, while retaining destination protection checks and window-state restoration.
+- Uses a SHA-256-named native focus helper for cached explicit-control operations, with atomic compilation, bounded corrupt-cache recovery, stdin-only request payloads, and no shell invocation.
+- Filters CDP-bound native window discovery by the verified renderer process before reading unrelated process names or window titles.
+- Passes 693 side-effect-free backend tests for the public v1.4.3 source snapshot.
 
 ### v1.4.2
 

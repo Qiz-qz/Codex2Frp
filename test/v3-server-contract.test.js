@@ -86,6 +86,10 @@ test('production server owns one lazy v3 app-server runtime with persistent queu
   assert.match(source, /PendingRequestStore/);
   assert.match(source, /turn-input-queue\.json/);
   assert.match(source, /serverRequestSink:\s*request => handleV3ServerRequest\(pendingRequestStore, request\)/);
+  assert.match(source, /serverRequestLifecycleSink:\s*event => handleV3ServerRequestLifecycle\(pendingRequestStore, event\)/);
+  assert.match(source, /notificationSink:\s*notification => handleV3Notification\(eventRuntime, pendingRequestStore, notification\)/);
+  assert.match(functionBody('handleV3Notification'), /serverRequest\/resolved[\s\S]*resolveServerRequest/);
+  assert.match(functionBody('handleV3ServerRequestLifecycle'), /connectionClosed[\s\S]*expireConnectionEpoch/);
   assert.match(source, /function handleV3ServerRequest[\s\S]*currentTimeAt/);
   assert.match(source, /function handleV3ServerRequest[\s\S]*item\/tool\/call[\s\S]*success:\s*false/);
   assert.match(source, /CODEX2FRP_APP_SERVER_REQUEST_TIMEOUT_MS\s*\|\|\s*20000/,
@@ -99,6 +103,12 @@ test('production server owns one lazy v3 app-server runtime with persistent queu
   assert.match(source, /const queueCommandCoordinator = new CommandCoordinator\(\{ guard \}\)/,
     'queue persistence has its own lock and cannot recursively acquire the RPC mutation lock');
   assert.match(source, /createBridgeV3Router\(\{[\s\S]*?queueCommandCoordinator,[\s\S]*?\}\)/);
+});
+
+test('server installs the desktop request bridge before renderer RPC and synchronizes request listing', () => {
+  assert.match(source, /new DesktopServerRequestBridge\s*\(/);
+  assert.match(source, /beforeInvoke:\s*\(\)\s*=>\s*desktopServerRequestBridge\.synchronize\(\)/);
+  assert.match(source, /pendingRequestStore\.setSynchronizer\s*\(\s*\(\)\s*=>\s*desktopServerRequestBridge\.synchronize\(\)/);
 });
 
 test('v3 dispatch authenticates before parsing or starting the lazy runtime', () => {

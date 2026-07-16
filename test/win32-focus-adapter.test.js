@@ -80,8 +80,9 @@ test('adapter restores the full captured placement and exposes activation primit
 
 test('adapter normalizes enumerated Win32 windows for strict Codex discovery', () => {
   const adapter = new Win32FocusAdapter({
-    runner(operation) {
+    runner(operation, payload) {
       assert.equal(operation, 'listTopLevelWindows');
+      assert.deepEqual(payload, { processId: 321 });
       return {
         windows: [{
           handle: 9001,
@@ -95,7 +96,7 @@ test('adapter normalizes enumerated Win32 windows for strict Codex discovery', (
     },
   });
 
-  assert.deepEqual(adapter.listTopLevelWindows(), [{
+  assert.deepEqual(adapter.listTopLevelWindows({ processId: 321 }), [{
     handle: '9001',
     ownerHandle: null,
     processId: 321,
@@ -105,34 +106,67 @@ test('adapter normalizes enumerated Win32 windows for strict Codex discovery', (
   }]);
 });
 
-test('PowerShell runner streams the native bridge over stdin to avoid Windows command-line limits', () => {
-  let invocation;
+test('adapter rejects invalid process filters before invoking the native helper', () => {
+  let calls = 0;
+  const adapter = new Win32FocusAdapter({
+    runner() { calls += 1; },
+  });
+  for (const processId of [0, -1, 1.5, 0x1_0000_0000, 'not-a-pid']) {
+    assert.throws(() => adapter.listTopLevelWindows({ processId }), /positive.*integer/i);
+  }
+  assert.equal(calls, 0);
+});
+
+test('native runner compiles one stable helper and sends every operation only over stdin', () => {
+  const invocations = [];
+  let assemblyExists = false;
   const runner = createPowerShellWin32Runner({
     platform: 'win32',
     powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    runtimeDir: 'E:\\runtime\\win32-focus',
+    existsSync() {
+      return assemblyExists;
+    },
+    mkdirSync() {},
     execFileSync(file, args, options) {
-      invocation = { file, args: [...args], options: { ...options } };
+      const invocation = { file, args: [...args], options: { ...options } };
+      invocations.push(invocation);
+      if (file.endsWith('powershell.exe')) {
+        assemblyExists = true;
+        return '';
+      }
+      const request = JSON.parse(options.input);
+      if (request.operation === '__health') return '{"ok":true}\r\n';
       return '{"handle":"7001"}\r\n';
     },
   });
 
   assert.deepEqual(runner('getForegroundWindow', {}), { handle: '7001' });
-  assert.equal(invocation.file.endsWith('powershell.exe'), true);
-  assert.deepEqual(invocation.args, [
-    '-NoProfile',
-    '-NonInteractive',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-Command',
-    '$input | Out-String | Invoke-Expression',
-  ]);
+  assert.deepEqual(runner('getForegroundWindow', {}), { handle: '7001' });
+  assert.equal(invocations.length, 4, 'one compile, one native validation, and two native operations');
+  const compileInvocation = invocations[0];
+  const validationInvocation = invocations[1];
+  const invocation = invocations[2];
+  assert.equal(compileInvocation.file.endsWith('powershell.exe'), true);
+  assert.match(validationInvocation.file, /Codex2FrpFocusNative-[a-f0-9]{64}\.exe$/);
+  assert.equal(invocation.file, validationInvocation.file);
+  assert.deepEqual(invocation.args, []);
   assert.equal(invocation.options.windowsHide, false);
   assert.equal(invocation.options.shell, false);
   assert.equal(invocation.options.encoding, 'utf8');
-  const script = invocation.options.input;
-  assert.equal(typeof script, 'string');
-  assert.ok(Buffer.from(script, 'utf16le').toString('base64').length > 32_767,
-    'the former encoded-command argument exceeds the Windows command-line limit');
+  const compileScript = compileInvocation.options.input;
+  const request = JSON.parse(invocation.options.input);
+  assert.equal(typeof compileScript, 'string');
+  assert.ok(compileScript.length > invocation.options.input.length * 2,
+    'the native source is confined to the one-time compiler input');
+  assert.equal(compileInvocation.args.some(argument => argument.includes('Codex2FrpFocusNative')), false,
+    'the native source never enters the Windows command line');
+  assert.match(compileScript, /Add-Type -TypeDefinition \$source -Language CSharp -OutputAssembly \$tempPath -OutputType ConsoleApplication/);
+  assert.match(compileScript, /Move-Item -LiteralPath \$tempPath -Destination \$assemblyPath/);
+  assert.deepEqual(JSON.parse(validationInvocation.options.input), { operation: '__health', payload: {} });
+  assert.deepEqual(request, { operation: 'getForegroundWindow', payload: {} });
+  assert.equal(invocation.args.some(argument => argument.includes('getForegroundWindow')), false,
+    'operation and payload never enter the command line');
   for (const api of [
     'EnumWindows',
     'GetForegroundWindow',
@@ -148,14 +182,97 @@ test('PowerShell runner streams the native bridge over stdin to avoid Windows co
     'BringWindowToTop',
     'SetActiveWindow',
   ]) {
-    assert.match(script, new RegExp(api));
+    assert.match(compileScript, new RegExp(api));
   }
-  assert.match(script, /finally\s*\{[\s\S]*AttachThreadInput\([^;]+false\)/,
+  assert.match(compileScript, /finally\s*\{[\s\S]*AttachThreadInput\([^;]+false\)/,
     'temporary input attachment is always detached');
-  assert.match(script, /GetForegroundWindow\(\)\s*==\s*handle/,
+  assert.match(compileScript, /GetForegroundWindow\(\)\s*==\s*handle/,
     'activation reports success only when the target is actually foreground');
-  assert.doesNotMatch(script, /SendKeys|keybd_event|SetWindowPos/,
+  assert.match(compileScript, /ListWindows\(uint filterProcessId\)[\s\S]*GetWindowThreadProcessId\(handle, out processId\);[\s\S]*filterProcessId != 0 && processId != filterProcessId[\s\S]*processNames\.TryGetValue/,
+    'a bound process is rejected before process-name and title work, while generic discovery caches process names');
+  assert.doesNotMatch(compileScript, /SendKeys|keybd_event|SetWindowPos/,
     'activation uses neither keyboard simulation nor permanent topmost flags');
+});
+
+test('native runner uses an existing cached helper without invoking PowerShell', () => {
+  const invocations = [];
+  const runner = createPowerShellWin32Runner({
+    platform: 'win32',
+    runtimeDir: 'E:\\runtime\\win32-focus',
+    existsSync: () => true,
+    mkdirSync() {},
+    execFileSync(file, args, options) {
+      invocations.push({ file, args, options });
+      const request = JSON.parse(options.input);
+      return request.operation === '__health' ? '{"ok":true}\r\n' : '{"handle":"7001"}\r\n';
+    },
+  });
+
+  assert.deepEqual(runner('getForegroundWindow', {}), { handle: '7001' });
+  assert.equal(invocations.length, 2, 'one bounded native validation plus the operation');
+  assert.equal(invocations.some(row => row.file.endsWith('powershell.exe')), false);
+  assert.match(invocations[0].file, /Codex2FrpFocusNative-[a-f0-9]{64}\.exe$/);
+  assert.deepEqual(invocations[0].args, []);
+});
+
+test('native runner removes one corrupt hash-named helper and rebuilds it once', () => {
+  const invocations = [];
+  const removed = [];
+  let corrupt = true;
+  let assemblyExists = true;
+  const runner = createPowerShellWin32Runner({
+    platform: 'win32',
+    runtimeDir: 'E:\\runtime\\win32-focus',
+    existsSync: () => assemblyExists,
+    mkdirSync() {},
+    unlinkSync(file) {
+      removed.push(file);
+      assemblyExists = false;
+      corrupt = false;
+    },
+    execFileSync(file, args, options) {
+      invocations.push({ file, args, options });
+      if (file.endsWith('powershell.exe')) {
+        assemblyExists = true;
+        return '';
+      }
+      const request = JSON.parse(options.input);
+      if (request.operation === '__health') {
+        if (corrupt) throw new Error('Bad IL format');
+        return '{"ok":true}\r\n';
+      }
+      return '{"handle":"7001"}\r\n';
+    },
+  });
+
+  assert.deepEqual(runner('getForegroundWindow', {}), { handle: '7001' });
+  assert.deepEqual(runner('getForegroundWindow', {}), { handle: '7001' });
+  assert.equal(removed.length, 1);
+  assert.match(removed[0], /Codex2FrpFocusNative-[a-f0-9]{64}\.exe$/);
+  assert.equal(invocations.filter(row => row.file.endsWith('powershell.exe')).length, 1);
+  assert.equal(invocations.length, 5, 'failed validation, compile, validation, and two operations');
+});
+
+test('native runner fails closed when the cached helper cannot be prepared', () => {
+  let calls = 0;
+  const runner = createPowerShellWin32Runner({
+    platform: 'win32',
+    runtimeDir: 'E:\\runtime\\win32-focus',
+    existsSync: () => false,
+    mkdirSync() {},
+    execFileSync() {
+      calls += 1;
+      throw new Error('compiler denied');
+    },
+  });
+
+  assert.throws(() => runner('getForegroundWindow', {}), error => {
+    assert.equal(error.code, 'WIN32_FOCUS_ASSEMBLY_FAILED');
+    assert.match(error.message, /could not be prepared/i);
+    assert.equal(JSON.stringify(error.details).includes('E:\\runtime'), false);
+    return true;
+  });
+  assert.equal(calls, 1, 'the operation is not attempted without a loadable native bridge');
 });
 
 test('PowerShell runner fails closed off Windows without invoking a process', () => {

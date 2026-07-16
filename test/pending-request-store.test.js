@@ -23,6 +23,7 @@ function deepKeys(value, output = new Set()) {
 function createHarness(options = {}) {
   let nowMs = options.nowMs ?? 1_752_105_600_000;
   let nextHandle = 0;
+  let nextRequestId = 0;
   const responses = [];
   const store = new PendingRequestStore({
     ttlMs: options.ttlMs ?? 60_000,
@@ -38,6 +39,8 @@ function createHarness(options = {}) {
       return store.capture({
         method,
         params: { threadId: THREAD, ...params },
+        requestId: params.requestId ?? `server-request-${++nextRequestId}`,
+        connectionEpoch: params.connectionEpoch ?? 1,
         respond(result) {
           responses.push(result);
           return { accepted: true };
@@ -136,7 +139,7 @@ test('strictly maps approval decisions and resolves each handle once', async () 
 
   await assert.rejects(
     harness.store.respond(THREAD, command.handle, { decision: 'accept' }),
-    error => error && error.code === 'PENDING_REQUEST_NOT_FOUND',
+    error => error && error.code === 'PENDING_REQUEST_RESOLVED',
   );
   const invalid = harness.capture('item/fileChange/requestApproval');
   await assert.rejects(
@@ -146,16 +149,13 @@ test('strictly maps approval decisions and resolves each handle once', async () 
   assert.equal(harness.store.list(THREAD).some(item => item.handle === invalid.handle), true);
 });
 
-test('approval DTO respects the decisions advertised by app-server', async () => {
+test('approval DTO ignores unproven availableDecisions fields and follows the installed schema', async () => {
   const harness = createHarness();
   const command = harness.capture('item/commandExecution/requestApproval', {
     availableDecisions: ['accept', 'decline', { unsupported: true }, 'futureDecision'],
   });
-  assert.deepEqual(command.decisions, ['accept', 'decline']);
-  await assert.rejects(
-    harness.store.respond(THREAD, command.handle, { decision: 'acceptForSession' }),
-    error => error && error.code === 'PENDING_REQUEST_RESPONSE_INVALID',
-  );
+  assert.deepEqual(command.decisions, ['accept', 'acceptForSession', 'decline', 'cancel']);
+  await harness.store.respond(THREAD, command.handle, { decision: 'acceptForSession' });
 });
 
 test('maps user-input and MCP answers through opaque field handles', async () => {
@@ -219,6 +219,144 @@ test('maps user-input and MCP answers through opaque field handles', async () =>
   assert.deepEqual(harness.responses.at(-1), { action: 'decline' });
 });
 
+test('maps real structured command approval decisions only to the exact server proposals', async () => {
+  const harness = createHarness();
+  const execAmendment = ['git', 'status'];
+  const networkAmendment = { host: 'example.test', action: 'allow' };
+  const command = harness.capture('item/commandExecution/requestApproval', {
+    proposedExecpolicyAmendment: execAmendment,
+    proposedNetworkPolicyAmendments: networkAmendment,
+  });
+
+  assert.deepEqual(command.decisions, [
+    'accept',
+    'acceptForSession',
+    'acceptWithExecpolicyAmendment',
+    'applyNetworkPolicyAmendment',
+    'decline',
+    'cancel',
+  ]);
+  await harness.store.respond(THREAD, command.handle, {
+    decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: execAmendment } },
+  });
+  assert.deepEqual(harness.responses.at(-1), {
+    decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: execAmendment } },
+  });
+
+  const network = harness.capture('item/commandExecution/requestApproval', {
+    proposedNetworkPolicyAmendments: networkAmendment,
+  });
+  await assert.rejects(
+    harness.store.respond(THREAD, network.handle, {
+      decision: { applyNetworkPolicyAmendment: { network_policy_amendment: { host: 'attacker.test' } } },
+    }),
+    error => error && error.code === 'PENDING_REQUEST_RESPONSE_INVALID',
+  );
+  assert.equal(harness.store.list(THREAD).some(item => item.handle === network.handle), true);
+  await harness.store.respond(THREAD, network.handle, {
+    decision: { applyNetworkPolicyAmendment: { network_policy_amendment: networkAmendment } },
+  });
+});
+
+test('approval DTO exposes only safe decision context and never raw commands or absolute paths', () => {
+  const harness = createHarness();
+  harness.capture('item/commandExecution/requestApproval', {
+    command: 'powershell -Command "$env:SECRET=token; Get-Content E:\\private\\secret.txt"',
+    commandActions: [
+      { type: 'read', command: 'Get-Content E:\\private\\secret.txt' },
+      { type: 'unknown', command: 'curl https://example.test/?token=secret' },
+    ],
+    cwd: 'E:\\workspace\\safe-project',
+    reason: 'Needs access to E:\\private\\secret.txt with token=secret',
+  });
+  harness.capture('item/fileChange/requestApproval', {
+    path: 'E:\\private\\report.txt',
+    grantRoot: 'E:\\private',
+    changes: [{ path: 'E:\\private\\report.txt', kind: { type: 'update' } }],
+  });
+  harness.capture('item/permissions/requestApproval', {
+    reason: 'Needs E:\\private and token=secret',
+    permissions: { network: true, fileSystem: { read: ['E:\\private'] } },
+  });
+
+  const serialized = JSON.stringify(harness.store.list(THREAD));
+  for (const secret of ['Get-Content', 'curl ', 'SECRET', 'token=secret', 'E:\\\\private', 'secret.txt']) {
+    assert.equal(serialized.includes(secret), false, `safe DTO leaked ${secret}`);
+  }
+  const [command, file, permissions] = harness.store.list(THREAD);
+  assert.deepEqual(command.context, {
+    actionCount: 2,
+    actionKinds: ['read', 'other'],
+    workingDirectoryName: 'safe-project',
+    reason: '需要额外授权才能执行此命令。',
+  });
+  assert.equal(file.context.fileName, 'report.txt');
+  assert.equal(file.context.grantRootName, 'private');
+  assert.equal(file.context.changeCount, 1);
+  assert.equal(permissions.reason, '需要额外权限。');
+});
+
+test('server resolution and connection epoch closure remove only the matching private request', async () => {
+  const harness = createHarness();
+  const first = harness.capture('item/commandExecution/requestApproval', {
+    requestId: 'same-id', connectionEpoch: 1,
+  });
+  const second = harness.capture('item/fileChange/requestApproval', {
+    requestId: 'same-id', connectionEpoch: 2,
+  });
+
+  assert.equal(harness.store.resolveServerRequest({
+    requestId: 'same-id', connectionEpoch: 1, threadId: THREAD,
+  }), true);
+  assert.deepEqual(harness.store.list(THREAD).map(item => item.handle), [second.handle]);
+  await assert.rejects(
+    harness.store.respond(THREAD, first.handle, { decision: 'decline' }),
+    error => error && error.code === 'PENDING_REQUEST_RESOLVED' && error.statusCode === 409,
+  );
+
+  assert.equal(harness.store.expireConnectionEpoch(2), 1);
+  assert.deepEqual(harness.store.list(THREAD), []);
+  await assert.rejects(
+    harness.store.respond(THREAD, second.handle, { decision: 'decline' }),
+    error => error && error.code === 'PENDING_REQUEST_EXPIRED' && error.statusCode === 410,
+  );
+});
+
+test('failed upstream responses preserve retryable entries and classify terminal races', async () => {
+  const store = new PendingRequestStore({ createHandle: () => 'opaque-retry' });
+  let attempt = 0;
+  const request = store.capture({
+    method: 'item/fileChange/requestApproval',
+    params: { threadId: THREAD },
+    requestId: 'retry-id',
+    connectionEpoch: 7,
+    respond() {
+      attempt += 1;
+      if (attempt === 1) throw Object.assign(new Error('temporary conflict'), { code: 'APP_SERVER_RPC_ERROR' });
+      return true;
+    },
+  });
+  await assert.rejects(
+    store.respond(THREAD, request.handle, { decision: 'decline' }),
+    error => error && error.code === 'PENDING_REQUEST_CONFLICT' && error.statusCode === 409,
+  );
+  assert.equal(store.list(THREAD).length, 1);
+  await store.respond(THREAD, request.handle, { decision: 'decline' });
+  assert.equal(store.list(THREAD).length, 0);
+
+  const resolved = new PendingRequestStore({ createHandle: () => 'opaque-resolved' });
+  const resolvedRequest = resolved.capture({
+    method: 'item/commandExecution/requestApproval', params: { threadId: THREAD },
+    requestId: 'resolved-id', connectionEpoch: 8,
+    respond() { throw Object.assign(new Error('already resolved'), { code: 'APP_SERVER_PROTOCOL_ERROR' }); },
+  });
+  await assert.rejects(
+    resolved.respond(THREAD, resolvedRequest.handle, { decision: 'decline' }),
+    error => error && error.code === 'PENDING_REQUEST_RESOLVED',
+  );
+  assert.equal(resolved.list(THREAD).length, 0);
+});
+
 test('dynamic tool requests resolve with exact installed response shape and are removed', async () => {
   const harness = createHarness();
   const request = harness.capture('item/tool/call', { callId: 'private-call', tool: 'private-tool', arguments: { token: 'private' } });
@@ -238,27 +376,19 @@ test('dynamic tool requests resolve with exact installed response shape and are 
   assert.deepEqual(harness.responses.at(-1), { success: false, contentItems: [] });
 });
 
-test('expires requests, enforces thread ownership, and keeps capacity bounded', async () => {
+test('keeps live requests until server resolution and fails closed at capacity without cancelling', async () => {
   const harness = createHarness({ ttlMs: 1000, maxEntries: 2 });
   const first = harness.capture('item/commandExecution/requestApproval');
   const second = harness.capture('item/fileChange/requestApproval');
   assert.equal(harness.capture('item/permissions/requestApproval'), null);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(harness.responses.at(-1), { permissions: {}, scope: 'turn' },
-    'a capacity-rejected request is safely resolved instead of hanging app-server');
+  assert.deepEqual(harness.responses, [], 'capacity pressure must not decide a live server request');
 
   await assert.rejects(
     harness.store.respond(OTHER_THREAD, first.handle, { decision: 'decline' }),
     error => error && error.code === 'PENDING_REQUEST_THREAD_MISMATCH',
   );
   harness.advance(1001);
-  assert.deepEqual(harness.store.list(THREAD), []);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.ok(harness.responses.some(result => result && result.decision === 'cancel'),
-    'expired approval requests are cancelled before removal');
-  await assert.rejects(
-    harness.store.respond(THREAD, second.handle, { decision: 'decline' }),
-    error => error && error.code === 'PENDING_REQUEST_NOT_FOUND',
-  );
-  assert.equal(harness.capture('item/permissions/requestApproval')?.kind, 'permissionsApproval');
+  assert.deepEqual(harness.store.list(THREAD).map(item => item.handle), [first.handle, second.handle]);
+  assert.equal(harness.capture('item/permissions/requestApproval'), null);
 });

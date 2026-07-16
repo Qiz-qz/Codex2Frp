@@ -69,6 +69,6 @@ test('show-thread result only succeeds with an exact route UUID match', () => {
   assert.equal(normalizeShowThreadResult({
     ok: true,
     threadId,
-    afterRoute: { threadId: '019f6596-e104-7d62-a0c7-e858f187c9f5' },
+    afterRoute: { threadId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
   }, threadId).ok, false);
 });
