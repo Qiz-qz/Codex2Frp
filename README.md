@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.0`.
+Current version: `v1.4.2`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.0 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.2 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -27,7 +27,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.0/              Latest public installer release
+release/v1.4.2/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -36,25 +36,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.0/Codex2FrpSetup-v1.4.0.exe
+release/v1.4.2/Codex2FrpSetup-v1.4.2.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.0/SHA256SUMS.txt
+release/v1.4.2/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.0/SHA256SUMS.txt
+release/v1.4.2/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.0.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.2.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -194,6 +194,16 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.2
+
+- Adds exact Codex CLI 0.144.5 compatibility only when its generated app-server schema matches the pinned 0.144.2/0.144.5 profile.
+- Routes supported desktop controls through the installed renderer RPC bridge with confirmed readback, while unknown or unavailable controls continue to fail closed.
+- Keeps passive synchronization focus-free and confines explicit phone actions to a short activation transaction that restores the original window, focus, and minimized state.
+- Preserves desktop-visible transient status while commands, edits, images, and subagent lifecycle rows arrive, replacing that status only when the desktop replaces or clears it.
+- Groups only visibly consecutive command, file, and image activity, and keeps subagents limited to sanitized names plus lifecycle state.
+- Restores historical image previews when a supported filename suffix disagrees with verified PNG/JPEG/GIF/WebP/BMP magic, while rejecting spoofed HEIC/HEIF content.
+- Adds confirmed native task navigation and renderer-backed task creation/settings controls without relying on unverified simulated clicks.
 
 ### v1.4.0
 

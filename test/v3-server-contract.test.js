@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { redactDiagnosticString } = require('../lib/diagnostics/diagnostic-report');
 const { createSessionNormalizer } = require('../lib/events/session-normalizer');
@@ -61,6 +62,16 @@ function attachmentMapper(overrides = {}) {
     overrides.capabilityAttachmentFile || (() => null),
     getPrivateAttachmentSource,
   );
+}
+
+function imageValidator() {
+  return new Function(
+    'fs', 'path', 'Buffer', 'MAX_OUTPUT_ATTACHMENT_BYTES', 'imageMimeTypeForFile',
+    `${functionSource('validatedImageFile')} return validatedImageFile;`,
+  )(fs, path, Buffer, 32 * 1024 * 1024, new Function(
+    'path',
+    `${functionSource('imageMimeTypeForFile')} return imageMimeTypeForFile;`,
+  )(path));
 }
 
 test('production server owns one lazy v3 app-server runtime with persistent queue', () => {
@@ -126,6 +137,30 @@ test('output images use bounded opaque capability URLs without paths or tokens',
   assert.match(functionBody('validatedImageFile'), /realpathSync/);
   assert.match(functionBody('validatedImageFile'), /MAX_OUTPUT_ATTACHMENT_BYTES/);
   assert.match(functionBody('handleAttachment'), /x-content-type-options/);
+});
+
+test('output image validation trusts verified magic MIME when a supported image suffix is misleading', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-magic-image-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const pngBytes = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+  const misleadingJpeg = path.join(root, 'hdc-snapshot.jpeg');
+  const unknownSuffix = path.join(root, 'hdc-snapshot.bin');
+  const forgedJpeg = path.join(root, 'forged.jpeg');
+  const disguisedHeic = path.join(root, 'disguised-heic.jpeg');
+  fs.writeFileSync(misleadingJpeg, pngBytes);
+  fs.writeFileSync(unknownSuffix, pngBytes);
+  fs.writeFileSync(forgedJpeg, Buffer.from('not an image', 'utf8'));
+  fs.writeFileSync(disguisedHeic, Buffer.from([0, 0, 0, 16, 0x66, 0x74, 0x79, 0x70,
+    0x68, 0x65, 0x69, 0x63, 0, 0, 0, 0]));
+
+  const validate = imageValidator();
+  assert.equal(validate(misleadingJpeg).mimeType, 'image/png');
+  assert.equal(validate(unknownSuffix), null, 'the path still needs a supported image suffix');
+  assert.equal(validate(forgedJpeg), null, 'the suffix alone never bypasses magic validation');
+  assert.equal(validate(disguisedHeic), null, 'HEIC content cannot masquerade behind a JPEG suffix');
 });
 
 test('attachment mapper preserves safe metadata without inventing a click target', () => {

@@ -51,6 +51,12 @@ test('verified Codex renderer hash route is accepted but unrelated renderer path
   }), null);
 });
 
+test('installed local task renderer route is accepted as exact desktop identity', () => {
+  assert.equal(normalizeVerifiedDesktopSelection({
+    route: `app://-/index.html#/local/${THREAD}`,
+  }).threadId, THREAD);
+});
+
 test('conflicting exact route and active-action UUID evidence fails closed', () => {
   assert.equal(normalizeVerifiedDesktopSelection({
     route: `app://-/index.html#/threads/${THREAD}`,
@@ -127,6 +133,54 @@ test('phone open fails closed on exact mismatch or absent exact observation', as
     },
   }).openDesktopThread(THREAD), {
     status: 'unavailable', requestedThreadId: THREAD, reason: 'exact_desktop_selection_unavailable',
+  });
+});
+
+test('native Codex deep-link dispatch confirms when optional CDP observation is unavailable', async () => {
+  const adapter = createDesktopSelectionAdapter({
+    observeSource: async () => null,
+    navigate: async ({ threadId }) => ({
+      method: 'codex-deep-link',
+      confirmedThreadId: threadId,
+    }),
+    transaction: { run: async (_context, operation) => operation({}) },
+    createIntent: ({ action, threadId }) => ({ action, threadId }),
+    createSourceToken: () => 'deep-link-token',
+    sleep: async () => {},
+    now: (() => { let value = 0; return () => value += 10; })(),
+    confirmationTimeoutMs: 20,
+    confirmationPollIntervalMs: 10,
+  });
+
+  assert.deepEqual(await adapter.openDesktopThread(THREAD), {
+    status: 'confirmed',
+    requestedThreadId: THREAD,
+    observedThreadId: THREAD,
+    verifiedBy: 'codex-deep-link',
+  });
+});
+
+test('native deep-link never overrides a conflicting exact CDP observation', async () => {
+  const adapter = createDesktopSelectionAdapter({
+    observeSource: async () => ({ route: `app://-/index.html#/threads/${OTHER_THREAD}` }),
+    navigate: async ({ threadId }) => ({
+      method: 'codex-deep-link',
+      confirmedThreadId: threadId,
+    }),
+    transaction: { run: async (_context, operation) => operation({}) },
+    createIntent: ({ action, threadId }) => ({ action, threadId }),
+    createSourceToken: () => 'deep-link-mismatch-token',
+    sleep: async () => {},
+    now: (() => { let value = 0; return () => value += 10; })(),
+    confirmationTimeoutMs: 20,
+    confirmationPollIntervalMs: 10,
+  });
+
+  assert.deepEqual(await adapter.openDesktopThread(THREAD), {
+    status: 'uncertain',
+    requestedThreadId: THREAD,
+    observedThreadId: OTHER_THREAD,
+    reason: 'desktop_selection_mismatch',
   });
 });
 

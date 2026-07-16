@@ -22,7 +22,7 @@
     "turn/completed", "turn/plan/updated", "item/started", "item/completed"
   ],
   "schemaHash": "2e30b98331bfd3951d812fe0a9c32f08caeef1e40749f77dc935baef8d33ba54",
-  "cliVersions": ["0.144.2"],
+  "cliVersions": ["0.144.2", "0.144.5"],
   "requestMethods": [
     "initialize", "thread/start", "thread/resume", "thread/fork", "thread/archive", "thread/delete",
     "thread/unsubscribe", "thread/increment_elicitation", "thread/decrement_elicitation", "thread/name/set",

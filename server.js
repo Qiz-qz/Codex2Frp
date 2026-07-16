@@ -43,6 +43,8 @@ const { AppServerProcessManager } = require('./lib/app-server/process-manager');
 const { AppServerRuntime } = require('./lib/app-server/runtime');
 const { PendingRequestStore } = require('./lib/app-server/pending-request-store');
 const { CommandCoordinator } = require('./lib/control/command-coordinator');
+const { DesktopInternalRpcAdapter } = require('./lib/control/desktop-internal-rpc-adapter');
+const { DesktopControlRuntime } = require('./lib/control/desktop-control-runtime');
 const { classifyMenuItem, isExecutableMenuItem } = require('./lib/control/composer-menu-classifier');
 const {
   consumeDesktopSelectionForSync,
@@ -364,6 +366,10 @@ function createV3Bridge() {
         protectionRegistry: threadProtectionRegistry,
       }),
       queue: null,
+      guard,
+      queueCommandCoordinator,
+      attachmentStore,
+      pendingRequestStore,
     };
   }
 
@@ -409,7 +415,16 @@ function createV3Bridge() {
       attachmentStore,
       pendingRequestStore,
     });
-    return { runtime, eventRuntime, router, queue, pendingRequestStore };
+    return {
+      runtime,
+      eventRuntime,
+      router,
+      queue,
+      guard,
+      queueCommandCoordinator,
+      attachmentStore,
+      pendingRequestStore,
+    };
   } catch (error) {
     const runtime = unavailableV3Runtime('Codex app-server initialization profile is invalid.', {
       cliVersion,
@@ -425,12 +440,41 @@ function createV3Bridge() {
         protectionRegistry: threadProtectionRegistry,
       }),
       queue: null,
+      guard,
+      queueCommandCoordinator,
+      attachmentStore,
+      pendingRequestStore,
     };
   }
 }
 
-const v3Bridge = createV3Bridge();
-const v3ApiRouter = v3Bridge.router;
+const v3BridgeBase = createV3Bridge();
+const desktopInternalRpcAdapter = new DesktopInternalRpcAdapter({
+  evaluate: evaluateCodexDesktopInternalRpc,
+  guard: v3BridgeBase.guard,
+  hostId: process.env.CODEX2FRP_DESKTOP_HOST_ID || 'local',
+  timeoutMs: CODEX_CDP_SEND_TIMEOUT_MS,
+});
+const desktopControlRuntime = new DesktopControlRuntime({
+  independentRuntime: v3BridgeBase.runtime,
+  desktopAdapter: desktopInternalRpcAdapter,
+});
+const v3ApiRouter = createBridgeV3Router({
+  runtime: desktopControlRuntime,
+  eventRuntime: v3BridgeBase.eventRuntime,
+  queue: v3BridgeBase.queue,
+  queueCommandCoordinator: v3BridgeBase.queueCommandCoordinator,
+  protectedThreadGuard: v3BridgeBase.guard,
+  protectionRegistry: threadProtectionRegistry,
+  attachmentStore: v3BridgeBase.attachmentStore,
+  pendingRequestStore: v3BridgeBase.pendingRequestStore,
+});
+const v3Bridge = {
+  ...v3BridgeBase,
+  independentRuntime: v3BridgeBase.runtime,
+  runtime: desktopControlRuntime,
+  router: v3ApiRouter,
+};
 const explicitUiProtectedThreadGuard = createDynamicProtectedThreadGuard({
   registry: threadProtectionRegistry,
   allowedThreadIds: splitConfiguredIds(process.env.CODEX2FRP_ALLOWED_THREAD_IDS),
@@ -447,12 +491,7 @@ const uiActionTransaction = new UiActionTransaction({
 const desktopSelectionAdapter = createDesktopSelectionAdapter({
   observeSource: readCurrentCodexThreadSelectionEvidenceViaCdp,
   navigate: async ({ threadId }) => {
-    const result = await activateCodexThreadViaExistingCdp(threadId);
-    if (result && result.ok === true) return result;
-    const error = new Error('The requested desktop task is not available through the verified Codex action route.');
-    error.code = String(result && result.code || 'DESKTOP_THREAD_NAVIGATION_UNAVAILABLE');
-    error.statusCode = 409;
-    throw error;
+    return navigateCodexThreadViaDeepLink(threadId);
   },
   transaction: uiActionTransaction,
   createIntent: createExplicitUiIntent,
@@ -491,14 +530,8 @@ async function resolveExplicitUiObservedThread() {
 }
 
 async function resolveExplicitProcessObservedThread() {
-  if (threadProtectionRegistry.summary().protectedCount === 0) return '';
-  const selection = await readCurrentCodexThreadSelection({ force: true });
-  const threadId = selection && selection.threadId || '';
-  if (threadId) return threadId;
-  const error = new Error('Codex control cannot be enabled while a protected desktop task cannot be verified. Finish or leave that task, then retry the explicit control action.');
-  error.code = 'PROTECTED_THREAD_CONTROL_ENABLE_BLOCKED';
-  error.statusCode = 409;
-  throw error;
+  const selection = await readCurrentCodexThreadSelection({ force: true }).catch(() => null);
+  return selection && selection.threadId || '';
 }
 
 function fileCacheSignature(stat) {
@@ -2222,9 +2255,12 @@ function validatedImageFile(filePath = '') {
             : sample.length >= 2 && sample.subarray(0, 2).toString('ascii') === 'BM'
               ? 'image/bmp'
               : sample.length >= 12 && sample.subarray(4, 8).toString('ascii') === 'ftyp'
-                ? (sample.subarray(8, 12).toString('ascii').startsWith('hei') ? extensionMime : '')
+                ? (['heic', 'heix', 'hevc', 'hevx'].includes(sample.subarray(8, 12).toString('ascii'))
+                    ? 'image/heic'
+                    : ['mif1', 'msf1'].includes(sample.subarray(8, 12).toString('ascii')) ? 'image/heif' : '')
                 : '';
-    if (!magicMime || (extensionMime !== magicMime && !(extensionMime === 'image/heif' && magicMime === 'image/heif'))) return null;
+    if (!magicMime) return null;
+    if ((magicMime === 'image/heic' || magicMime === 'image/heif') && extensionMime !== magicMime) return null;
     return { filePath: resolvedPath, mimeType: magicMime, size: stat.size, mtimeMs: stat.mtimeMs };
   } catch {
     return null;
@@ -3454,6 +3490,14 @@ async function handleV3ApiRequest(req, res) {
       });
     }
   }
+  const requestPathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+  if (req.method === 'GET' && [
+    '/codex/v3/meta',
+    '/codex/v3/capabilities',
+    '/codex/v3/diagnostics',
+  ].includes(requestPathname)) {
+    await desktopInternalRpcAdapter.probe();
+  }
   const result = await v3ApiRouter.handle({
     method: req.method,
     url: req.url,
@@ -3462,7 +3506,7 @@ async function handleV3ApiRequest(req, res) {
   if (!result || result.handled !== true) {
     return json(res, 404, { error: { code: 'NOT_FOUND', message: 'API route not found.' } });
   }
-  const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+  const pathname = requestPathname;
   const bodyForClient = /\/events(?:\/snapshot|\/cursor)?$/.test(pathname)
     ? enrichV3EventResponse(result.body, req)
     : result.body;
@@ -4014,6 +4058,26 @@ async function cdpEvaluate(client, expression) {
     throw new Error(result.exceptionDetails.text || 'Codex CDP evaluation failed.');
   }
   return result.result && result.result.value;
+}
+
+async function evaluateCodexDesktopInternalRpc(expression, options = {}) {
+  const target = await findCodexCdpTarget({
+    autoOpen: false,
+    probeTimeoutMs: Math.min(
+      Number(options.timeoutMs) || CODEX_CDP_PASSIVE_SEND_TIMEOUT_MS,
+      CODEX_CDP_PASSIVE_SEND_TIMEOUT_MS,
+    ),
+  });
+  const client = await connectCdpWebSocket(
+    target.webSocketDebuggerUrl,
+    Number(options.timeoutMs) || CODEX_CDP_SEND_TIMEOUT_MS,
+  );
+  try {
+    await client.call('Runtime.enable').catch(() => {});
+    return await cdpEvaluate(client, expression);
+  } finally {
+    client.close();
+  }
 }
 
 async function focusCodexComposerInCdpClient(client) {
@@ -6157,6 +6221,33 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
   }
 }
 
+async function navigateCodexThreadViaDeepLink(threadId = '') {
+  if (!isCodexThreadId(threadId)) {
+    const error = new Error('A valid Codex task id is required for desktop navigation.');
+    error.code = 'BAD_THREAD_ID';
+    error.statusCode = 400;
+    throw error;
+  }
+  threadId = String(threadId).toLowerCase();
+  const deepLink = codexThreadDeepLink(threadId);
+  if (!deepLink) {
+    const error = new Error('The Codex desktop deep link could not be created.');
+    error.code = 'CODEX_THREAD_DEEP_LINK_UNAVAILABLE';
+    error.statusCode = 409;
+    throw error;
+  }
+  assertExplicitUiActionNotAborted();
+  await openWindowsUri(deepLink);
+  await delay(CODEX_DEEPLINK_SETTLE_MS);
+  assertExplicitUiActionNotAborted();
+  lastCodexThreadActivation = { threadId, at: Date.now() };
+  return {
+    method: 'codex-deep-link',
+    confirmedThreadId: threadId,
+    route: deepLink,
+  };
+}
+
 async function activateCodexThreadForComposerAction(threadId = '') {
   if (!threadId) {
     return await focusCurrentCodexComposerForComposerAction('', {
@@ -6436,11 +6527,32 @@ async function handleNewCodexThread(req, res) {
   try {
     const target = resolveNewThreadTarget(payload);
     const project = classifyThreadProject(target.cwd);
-    const creation = await createNewCodexThreadViaExistingCdp(target);
+    const creation = await desktopInternalRpcAdapter.startThread({
+      ...(target.cwd ? { cwd: target.cwd } : {}),
+      ephemeral: false,
+      sessionStartSource: 'startup',
+    });
+    const threadId = String(creation && (creation.threadId || creation.thread?.id) || '').trim();
+    if (!isCodexThreadId(threadId)) {
+      const error = new Error('Codex created a task without returning a valid id.');
+      error.code = 'THREAD_START_ID_MISSING';
+      error.statusCode = 502;
+      throw error;
+    }
+    const selection = await desktopSelectionAdapter.openDesktopThread(threadId);
+    if (!selection || selection.status !== 'confirmed') {
+      const error = new Error('The task was created, but the desktop could not confirm navigation to it.');
+      error.code = 'THREAD_CREATED_DESKTOP_SELECTION_UNCONFIRMED';
+      error.statusCode = selection && selection.status === 'uncertain' ? 409 : 503;
+      error.details = { threadId, selection };
+      throw error;
+    }
     return json(res, 200, {
       ok: true,
-      pending: true,
-      createdBy: creation.method,
+      pending: false,
+      threadId,
+      createdBy: 'desktop-internal-rpc',
+      selectedBy: selection.verifiedBy || selection.navigation?.method || 'codex-deep-link',
       cwd: project.isProjectThread ? target.cwd : '',
       projectName: project.projectName,
       projectPath: project.projectPath,
@@ -6451,8 +6563,9 @@ async function handleNewCodexThread(req, res) {
         : '已在 Codex 打开一个新的对话线程。',
     });
   } catch (error) {
-    if (error && error.status) {
-      return json(res, error.status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '新建线程失败。' });
+    const status = Number(error && (error.statusCode || error.status));
+    if (status) {
+      return json(res, status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '新建线程失败。' });
     }
     const explained = explainTargetError(error, 'codex');
     return json(res, 500, { ok: false, ...explained });
@@ -7050,8 +7163,29 @@ async function trySyncCodexSpeedViaExistingCdp(target = {}, threadId = '') {
 }
 
 async function stopCodexResponse(threadId = '') {
-  await focusTarget('codex', threadId);
-  await pressCancelCodexResponse();
+  if (!isCodexThreadId(threadId)) {
+    const error = new Error('A concrete task id is required to interrupt Codex.');
+    error.code = 'TARGET_THREAD_REQUIRED';
+    error.statusCode = 400;
+    throw error;
+  }
+  const response = await desktopInternalRpcAdapter.readThread({ threadId, includeTurns: true });
+  const thread = response && response.thread && typeof response.thread === 'object'
+    ? response.thread
+    : response;
+  const turns = thread && Array.isArray(thread.turns) ? thread.turns : [];
+  const active = [...turns].reverse().find(turn => {
+    const status = String(turn && turn.status || '').toLowerCase();
+    return turn && turn.id && !['completed', 'failed', 'interrupted', 'cancelled', 'canceled'].includes(status);
+  });
+  const turnId = String(active && active.id || '').trim();
+  if (!turnId) {
+    const error = new Error('The selected Codex task has no active turn to interrupt.');
+    error.code = 'NO_ACTIVE_TURN';
+    error.statusCode = 409;
+    throw error;
+  }
+  return desktopInternalRpcAdapter.interruptTurn({ threadId, turnId });
 }
 
 function assertCodexComposerActionThreadIdle(threadId = '') {
@@ -7332,12 +7466,12 @@ async function handleStopCodex(req, res) {
 
   try {
     invalidateCodexThreadListCache();
-    await stopCodexResponse(threadId);
+    const result = await stopCodexResponse(threadId);
     invalidateCodexThreadListCache();
-    return json(res, 200, { ok: true, threadId, message: '已向 Codex 发送终止指令。' });
+    return json(res, 200, { ok: true, threadId, result, message: '已向 Codex 发送终止指令。' });
   } catch (error) {
     const explained = explainTargetError(error, 'codex');
-    return json(res, 500, { ok: false, ...explained });
+    return json(res, Number(error && (error.statusCode || error.status)) || 500, { ok: false, ...explained });
   }
 }
 
@@ -7356,14 +7490,24 @@ async function handleModelSwitch(req, res) {
   const threadId = typeof payload.threadId === 'string' ? payload.threadId : '';
   const target = typeof payload.target === 'string' ? payload.target : '';
   try {
-    const result = await switchCodexGuiModel(threadId, target);
-    return json(res, 200, result);
+    if (!isCodexThreadId(threadId)) {
+      return json(res, 400, { ok: false, code: 'BAD_THREAD_ID', message: '线程 ID 不正确。' });
+    }
+    const model = findModelOption(target) || normalizeModelOption({ id: target, model: target, displayName: target });
+    if (!model || !String(model.id || model.key || '').trim()) {
+      return json(res, 400, { ok: false, code: 'BAD_MODEL', message: '模型选项不正确。' });
+    }
+    const modelId = String(model.id || model.key).trim();
+    const rpc = await desktopInternalRpcAdapter.updateThreadSettings({ threadId, model: modelId });
+    writeControlOverride('model', modelId);
+    return json(res, 200, { ok: true, threadId, model: modelId, rpc, verifiedBy: 'desktop-internal-rpc' });
   } catch (error) {
-    if (error && error.status) {
-      return json(res, error.status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '切换模型失败。', detail: error.detail || '' });
+    const status = Number(error && (error.statusCode || error.status));
+    if (status) {
+      return json(res, status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '切换模型失败。', detail: error.detail || error.details || '' });
     }
     const explained = explainTargetError(error, 'codex');
-    return json(res, 500, { ok: false, ...explained, message: '没能通过 Codex GUI 切换模型。请确认 Codex 正在运行，且辅助功能权限正常。' });
+    return json(res, 500, { ok: false, ...explained, message: 'Codex 桌面内建 RPC 未能切换模型，请先启用桌面控制。' });
   }
 }
 
@@ -7382,14 +7526,23 @@ async function handleReasoningMode(req, res) {
   const threadId = typeof payload.threadId === 'string' ? payload.threadId : '';
   const target = typeof payload.target === 'string' ? payload.target : '';
   try {
-    const result = await switchCodexReasoningMode(threadId, target);
-    return json(res, 200, result);
+    if (!isCodexThreadId(threadId)) {
+      return json(res, 400, { ok: false, code: 'BAD_THREAD_ID', message: '线程 ID 不正确。' });
+    }
+    const effort = String(REASONING_MODE_TARGETS[target]?.value || target || '').trim().toLowerCase();
+    if (!Object.hasOwn(REASONING_MODE_TARGETS, effort)) {
+      return json(res, 400, { ok: false, code: 'BAD_REASONING_MODE', message: '推理强度不正确。' });
+    }
+    const rpc = await desktopInternalRpcAdapter.updateThreadSettings({ threadId, effort });
+    writeControlOverride('reasoning', effort);
+    return json(res, 200, { ok: true, threadId, effort, rpc, verifiedBy: 'desktop-internal-rpc' });
   } catch (error) {
-    if (error && error.status) {
-      return json(res, error.status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '切换推理模式失败。' });
+    const status = Number(error && (error.statusCode || error.status));
+    if (status) {
+      return json(res, status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '切换推理模式失败。' });
     }
     const explained = explainTargetError(error, 'codex');
-    return json(res, 500, { ok: false, ...explained, message: '没能通过 Codex GUI 切换推理模式。请确认 Codex 正在运行，且辅助功能权限正常。' });
+    return json(res, 500, { ok: false, ...explained, message: 'Codex 桌面内建 RPC 未能切换推理强度，请先启用桌面控制。' });
   }
 }
 
@@ -7408,14 +7561,56 @@ async function handleSpeedMode(req, res) {
   const threadId = typeof payload.threadId === 'string' ? payload.threadId : '';
   const target = typeof payload.target === 'string' ? payload.target : '';
   try {
-    const result = await switchCodexSpeedMode(threadId, target);
-    return json(res, 200, result);
+    if (!isCodexThreadId(threadId)) {
+      return json(res, 400, { ok: false, code: 'BAD_THREAD_ID', message: '线程 ID 不正确。' });
+    }
+    const speed = SPEED_MODE_TARGETS[String(target || '').trim().toLowerCase()];
+    if (!speed) {
+      return json(res, 400, { ok: false, code: 'BAD_SPEED_MODE', message: '服务速度不正确。' });
+    }
+    const rpc = await desktopInternalRpcAdapter.updateThreadSettings({
+      threadId,
+      serviceTier: speed.serviceTier,
+    });
+    writeControlOverride('speed', speed.key);
+    return json(res, 200, {
+      ok: true,
+      threadId,
+      serviceTier: speed.serviceTier,
+      speed: speed.key,
+      rpc,
+      verifiedBy: 'desktop-internal-rpc',
+    });
   } catch (error) {
-    if (error && error.status) {
-      return json(res, error.status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '切换速度模式失败。', detail: error.detail || '' });
+    const status = Number(error && (error.statusCode || error.status));
+    if (status) {
+      return json(res, status, { ok: false, code: error.code || 'BAD_REQUEST', message: error.message || '切换速度模式失败。', detail: error.detail || error.details || '' });
     }
     const explained = explainTargetError(error, 'codex');
-    return json(res, 500, { ok: false, ...explained, message: '没能通过 Codex GUI 切换速度模式。请确认 Codex 正在运行，且辅助功能权限正常。' });
+    return json(res, 500, { ok: false, ...explained, message: 'Codex 桌面内建 RPC 未能切换服务速度，请先启用桌面控制。' });
+  }
+}
+
+async function assertCodexControlRestartSafe() {
+  const selection = await readCurrentCodexThreadSelection({ force: true }).catch(() => null);
+  const candidates = [
+    selection && selection.threadId,
+    ...listCodexThreads(24).map(thread => thread && thread.id),
+  ].filter(isCodexThreadId);
+  for (const threadId of new Set(candidates)) {
+    const status = parseCodexStatus({ threadId });
+    const active = status && (
+      status.active === true
+      || status.running === true
+      || status.status === 'running'
+      || status.status === 'waiting'
+    );
+    if (!active) continue;
+    const error = new Error('Codex 正在执行任务。请等待当前轮完成后再启用桌面控制，后端不会为启用控制而重启正在工作的 Codex。');
+    error.code = 'CODEX_CONTROL_ENABLE_WAIT_FOR_IDLE';
+    error.statusCode = 409;
+    error.details = { active: true, status: String(status.status || 'running') };
+    throw error;
   }
 }
 
@@ -7423,11 +7618,23 @@ async function resolveControlPortState(payload, options) {
   payload = payload && typeof payload === 'object' ? payload : {};
   options = options && typeof options === 'object' ? options : {};
   assertExplicitUiActionNotAborted(options.signal);
-  const result = await ensureCodexCdpReady({
-    forceRestart: payload.forceRestart === true,
-    autoOpen: payload.autoOpen === true,
-    signal: options.signal,
-  });
+  let result;
+  try {
+    result = await ensureCodexCdpReady({
+      forceRestart: false,
+      autoOpen: false,
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (payload.autoOpen !== true) throw error;
+    await assertCodexControlRestartSafe();
+    assertExplicitUiActionNotAborted(options.signal);
+    result = await ensureCodexCdpReady({
+      forceRestart: true,
+      autoOpen: true,
+      signal: options.signal,
+    });
+  }
   assertExplicitUiActionNotAborted(options.signal);
   const modeOptions = options.refreshModeOptions === true
     ? await readLiveCodexModeOptionsBounded({ force: true }).catch(() => cachedLiveModeOptions())
@@ -7456,10 +7663,10 @@ async function resolveControlPortState(payload, options) {
 }
 
 const CODEX_CONTROL_PERMISSIONS = Object.freeze([
-  '读取 Codex 当前模型、思考强度、速度按钮状态',
-  '读取模型、思考强度、速度菜单候选项',
-  '点击 Codex 菜单项完成模型、思考强度、速度切换',
-  '向 Codex 输入框插入文字并点击发送按钮',
+  '通过 Codex 桌面内建 RPC 读取模型与任务状态',
+  '通过 Codex 桌面内建 RPC 新建、读取和切换任务',
+  '通过 Codex 桌面内建 RPC 更新模型、思考强度与服务速度',
+  '通过 Codex 桌面内建 RPC 发送与终止任务',
 ]);
 
 async function handleControlPort(req, res, options = {}) {
@@ -7514,8 +7721,16 @@ async function handleSend(req, res) {
     return json(res, error.status || 400, { ok: false, code: 'BAD_REQUEST', message: error.message || '请求格式不正确。' });
   }
 
+  if (payload.target !== 'codex') {
+    return json(res, 400, {
+      ok: false,
+      code: 'UNSUPPORTED_SEND_TARGET',
+      message: '手机端发送只能明确投递到 Codex 桌面任务。',
+    });
+  }
+
   const text = typeof payload.text === 'string' ? payload.text : '';
-  const target = payload.target === 'codex' ? 'codex' : 'frontmost';
+  const target = 'codex';
   const selectedThreadId = typeof payload.threadId === 'string' ? payload.threadId : '';
   const assumeThreadSynced = payload.assumeThreadSynced === true;
   const expectNewThread = payload.expectNewThread === true && target === 'codex' && !selectedThreadId;
@@ -7539,13 +7754,11 @@ async function handleSend(req, res) {
       });
     }
   }
-  let attachments = [];
-  try {
-    attachments = decodeAttachments(payload.attachments);
-  } catch (error) {
-    return json(res, 400, { ok: false, code: 'BAD_ATTACHMENT', message: error.message || '图片附件不正确。' });
+  const requestAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  if (requestAttachments.length > MAX_ATTACHMENTS) {
+    return json(res, 400, { ok: false, code: 'BAD_ATTACHMENT', message: `图片最多一次发送 ${MAX_ATTACHMENTS} 张。` });
   }
-  if (!text.trim() && !attachments.length) {
+  if (!text.trim() && !requestAttachments.length) {
     return json(res, 400, { ok: false, code: 'EMPTY_TEXT', message: '请输入文字或添加图片。' });
   }
   if (text.length > MAX_TEXT_LENGTH) {
@@ -7553,7 +7766,7 @@ async function handleSend(req, res) {
   }
 
   const mobileCommand = mobileComposerCommandForText(text);
-  if (target === 'codex' && !attachments.length && mobileCommand) {
+  if (target === 'codex' && !requestAttachments.length && mobileCommand) {
     try {
       invalidateCodexThreadListCache();
       const actionResult = await runCodexComposerAction(selectedThreadId, mobileCommand.action, mobileCommand.target);
@@ -7584,6 +7797,69 @@ async function handleSend(req, res) {
       const explained = explainTargetError(error, target);
       return json(res, 500, { ok: false, ...explained });
     }
+  }
+
+  if (target === 'codex') {
+    try {
+      invalidateCodexThreadListCache();
+      const sentAt = new Date().toISOString();
+      const direct = await desktopInternalRpcAdapter.send({
+        threadId: selectedThreadId,
+        text,
+        attachments: requestAttachments,
+        clientRequestId,
+        cwd: expectNewThread ? expectedNewThreadCwd : '',
+      });
+      const watch = {
+        since: sentAt,
+        threadId: direct.threadId,
+        expectNewThread: false,
+        excludeThreadId: '',
+        cwd: '',
+      };
+      const result = {
+        ok: true,
+        message: '消息已由 Codex 原生控制接口接收。',
+        target,
+        delivery: 'rpc',
+        sentAt,
+        threadId: direct.threadId,
+        turnId: direct.turnId,
+        createdThread: direct.createdThread,
+        attachments: requestAttachments.map(item => ({
+          name: String(item && item.name || ''),
+          type: String(item && (item.mimeType || item.mime || item.type) || ''),
+        })),
+        watch,
+      };
+      if (clientRequestId) {
+        recentSendRequests.set(clientRequestId, {
+          createdAt: Date.now(),
+          sentAt,
+          watch,
+          result,
+        });
+      }
+      invalidateCodexThreadListCache();
+      return json(res, 200, result);
+    } catch (error) {
+      if (clientRequestId) recentSendRequests.delete(clientRequestId);
+      const status = Number(error && (error.statusCode || error.status))
+        || (error && error.code === 'PROTECTED_THREAD' ? 403 : 409);
+      return json(res, status, {
+        ok: false,
+        code: String(error && error.code || 'CODEX_NATIVE_SEND_FAILED'),
+        message: String(error && error.message || 'Codex 原生发送失败。'),
+        detail: error && error.details || {},
+      });
+    }
+  }
+
+  let attachments = [];
+  try {
+    attachments = decodeAttachments(requestAttachments);
+  } catch (error) {
+    return json(res, 400, { ok: false, code: 'BAD_ATTACHMENT', message: error.message || '图片附件不正确。' });
   }
 
   try {
@@ -8396,7 +8672,7 @@ async function dispatchRequest(req, res) {
   if (req.method === 'POST' && req.url.startsWith('/codex/sakura/config')) return handleSakuraConfig(req, res);
   if (req.method === 'POST' && req.url.startsWith('/codex/sakura/reconcile')) return handleSakuraReconcile(req, res);
   if (req.url.startsWith('/codex/sakura/discover')) return json(res, 404, { ok: false, code: 'NOT_FOUND', message: '远程链接自动检测已移除，请手动填写链接和端口。' });
-  if (req.method === 'POST' && pathname === '/send') return handleExplicitUiRequest(req, res, handleSend);
+  if (req.method === 'POST' && pathname === '/send') return handleSend(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/threads')) return handleThreads(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/foreground-notices')) return handleForegroundNotices(req, res);
   if (req.method === 'GET' && req.url.startsWith('/codex/history')) return handleThreadHistory(req, res);
@@ -8406,14 +8682,14 @@ async function dispatchRequest(req, res) {
   if (req.method === 'GET' && pathname === '/codex/control-port') return handleControlPort(req, res);
   if (req.method === 'POST' && pathname === '/codex/control-port') return handleExplicitProcessControlRequest(req, res);
   if (req.method === 'POST' && pathname === '/codex/select') return handleSelectThread(req, res);
-  if (req.method === 'POST' && pathname === '/codex/new-thread') return handleExplicitUiRequest(req, res, handleNewCodexThread);
+  if (req.method === 'POST' && pathname === '/codex/new-thread') return handleNewCodexThread(req, res);
   if (req.method === 'POST' && pathname === '/codex/thread-action') return handleExplicitUiRequest(req, res, handleThreadAction);
   if (req.method === 'GET' && pathname === '/codex/composer-plus-menu') return handleExplicitUiRequest(req, res, handleComposerPlusMenu);
   if (req.method === 'POST' && pathname === '/codex/composer-action') return handleExplicitUiRequest(req, res, handleComposerAction);
-  if (req.method === 'POST' && pathname === '/codex/model-switch') return handleExplicitUiRequest(req, res, handleModelSwitch);
-  if (req.method === 'POST' && pathname === '/codex/reasoning-mode') return handleExplicitUiRequest(req, res, handleReasoningMode);
-  if (req.method === 'POST' && pathname === '/codex/speed-mode') return handleExplicitUiRequest(req, res, handleSpeedMode);
-  if (req.method === 'POST' && pathname === '/codex/stop') return handleExplicitUiRequest(req, res, handleStopCodex);
+  if (req.method === 'POST' && pathname === '/codex/model-switch') return handleModelSwitch(req, res);
+  if (req.method === 'POST' && pathname === '/codex/reasoning-mode') return handleReasoningMode(req, res);
+  if (req.method === 'POST' && pathname === '/codex/speed-mode') return handleSpeedMode(req, res);
+  if (req.method === 'POST' && pathname === '/codex/stop') return handleStopCodex(req, res);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
   json(res, 405, { ok: false, code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed' });
 }
