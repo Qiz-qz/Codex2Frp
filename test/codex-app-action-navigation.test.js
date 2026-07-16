@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 
 const {
   buildShowThreadExpression,
+  buildShowHomeExpression,
   buildCurrentThreadExpression,
+  normalizeShowHomeResult,
   normalizeShowThreadResult,
 } = require('../lib/control/codex-app-action-navigation');
 
@@ -19,6 +21,26 @@ test('show-thread expression uses the renderer-bound Codex app action and exact 
   assert.match(expression, new RegExp(threadId));
   assert.match(expression, /after\?\.window\?\.route\?\.threadId === threadId/);
   assert.doesNotMatch(expression, /codex:\/\/threads|data-app-action-sidebar-thread-id|\.click\(/);
+});
+
+test('show-home expression matches the native Codex plus action and confirms the home route', () => {
+  const expression = buildShowHomeExpression();
+  assert.match(expression, /type:\s*'windows\.show_home'/);
+  assert.match(expression, /route\?\.kind === 'home'/);
+  assert.match(expression, /route\?\.pathname === '\/'/);
+  assert.doesNotMatch(expression, /thread\/start|codex:\/\/|\.click\(/);
+
+  assert.equal(normalizeShowHomeResult({ ok: true, afterRoute: { kind: 'local-thread' } }).ok, false);
+  assert.deepEqual(normalizeShowHomeResult({
+    ok: true,
+    windowId: 'current',
+    afterRoute: { kind: 'home', pathname: '/' },
+  }), {
+    ok: true,
+    windowId: 'current',
+    route: { kind: 'home', pathname: '/' },
+    method: 'codex-app-action',
+  });
 });
 
 test('current-thread expression reads the authoritative in-window route summary', () => {

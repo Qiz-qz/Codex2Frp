@@ -7,6 +7,8 @@ This backend-only public snapshot corresponds to the internal Codex2Frp 2.4.3 ca
 - Reads the authoritative in-window route for bidirectional task synchronization and protected-task mutation guards.
 - Recognizes the current desktop `Light` and `轻度` reasoning labels while retaining exact selection confirmation.
 - Preserves same-task RPC-confirmed model, reasoning, and speed readback when the desktop trigger temporarily exposes only a generic custom label.
+- Opens the native Codex home for deferred new-task creation and applies a bounded 15-second initialization timeout to explicit immediate `thread/start` requests.
+- Allows explicit task selection to leave the native home route without inventing an active source task, while preserving destination guards and focus restoration.
 - Keeps mismatched, unsupported, and unconfirmed navigation or control results fail closed.
 
 Only the Windows backend installer and its SHA-256 checksum are intended as GitHub Release assets. Mobile client packages, signing materials, screenshots, local runtime state, and user data are not included.

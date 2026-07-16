@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   DesktopInternalRpcAdapter,
+  THREAD_START_TIMEOUT_MS,
   desktopRpcExpression,
   unwrapDesktopRpcResponse,
 } = require('../lib/control/desktop-internal-rpc-adapter');
@@ -24,6 +25,21 @@ test('desktop RPC expression uses the installed electron bridge and matches one 
   assert.match(expression, /message\.id/);
   assert.match(expression, /data\.message\s*\|\|\s*data\.response/);
   assert.doesNotMatch(expression, /querySelector|\.click\(|dispatchEvent\(new (?:Mouse|Pointer|Keyboard)Event/);
+});
+
+test('thread start allows the current desktop enough time to initialize a new task', async () => {
+  const observations = [];
+  const adapter = new DesktopInternalRpcAdapter({
+    timeoutMs: 4500,
+    evaluate: async (expression, options) => {
+      observations.push({ expression, options });
+      return { ok: true, result: { thread: { id: THREAD } } };
+    },
+  });
+
+  await adapter.startThread({ cwd: 'E:\\workspace' });
+  assert.equal(observations[0].options.timeoutMs, THREAD_START_TIMEOUT_MS + 250);
+  assert.match(observations[0].expression, new RegExp(`const timeoutMs = ${THREAD_START_TIMEOUT_MS}`));
 });
 
 test('desktop response parser accepts both installed renderer wrappers and rejects cross-host replies', () => {

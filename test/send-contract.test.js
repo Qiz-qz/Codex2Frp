@@ -94,8 +94,12 @@ test('composer actions cover compact, goal, plan, and exact plus menu item entry
   assert.doesNotMatch(cdpThreadBody, /openWindowsUri|codexThreadDeepLink/, 'composer thread activation does not use protocol links that can open another client');
 });
 
-test('new thread actions use desktop internal RPC then explicitly synchronize the desktop route', () => {
+test('new thread actions preserve native desktop plus semantics and can explicitly materialize a task', () => {
   const handlerBody = functionBody('handleNewCodexThread');
+  assert.match(handlerBody, /payload\.deferCreate === true[\s\S]*activateCodexHomeViaExistingCdp\(\)/,
+    'mobile top plus can open the renderer-bound native Codex home without creating an empty task');
+  assert.ok(handlerBody.indexOf('payload.deferCreate === true') < handlerBody.indexOf('desktopInternalRpcAdapter.startThread('),
+    'deferred native-home handling returns before the immediate thread creation path');
   assert.match(handlerBody, /desktopInternalRpcAdapter\.startThread\(/, 'new-thread endpoint creates through the desktop app-server connection');
   assert.match(handlerBody, /desktopSelectionAdapter\.openDesktopThread\(threadId\)/, 'new-thread endpoint synchronizes desktop selection through the explicit deep-link transaction');
   assert.match(handlerBody, /THREAD_CREATED_DESKTOP_SELECTION_UNCONFIRMED/, 'failed post-create navigation is reported honestly');

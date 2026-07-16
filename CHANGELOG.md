@@ -9,6 +9,8 @@ This public snapshot corresponds to the internal Codex2Frp 2.4.3 capability line
 - Reads the authoritative in-window route summary for bidirectional task synchronization and exact protected-task mutation guards.
 - Recognizes the current desktop `Light` and `轻度` reasoning labels while preserving exact selected-effort confirmation.
 - Stores confirmed control overrides against the exact task and uses them as explicitly labeled readback only when that same task's desktop trigger exposes no exact value.
+- Preserves native plus-button semantics through renderer-bound `windows.show_home`, while immediate `thread/start` receives a dedicated bounded initialization timeout.
+- Lets `thread.openDesktop` leave the native home route without fabricating an active source task; the requested destination remains protected before discovery and again under the global UI lock.
 - Keeps unsupported, mismatched, and unconfirmed navigation or control results fail closed.
 
 ## [1.4.2] - 2026-07-16

@@ -49,7 +49,9 @@ const { DesktopControlRuntime } = require('./lib/control/desktop-control-runtime
 const { createCdpBoundThreadNavigator } = require('./lib/control/cdp-bound-thread-navigation');
 const {
   buildShowThreadExpression,
+  buildShowHomeExpression,
   buildCurrentThreadExpression,
+  normalizeShowHomeResult,
   normalizeShowThreadResult,
 } = require('./lib/control/codex-app-action-navigation');
 const { classifyMenuItem, isExecutableMenuItem } = require('./lib/control/composer-menu-classifier');
@@ -6188,6 +6190,24 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
   }
 }
 
+async function activateCodexHomeViaExistingCdp() {
+  await restoreCodexDesktopWindow();
+  const target = await findCodexCdpTarget({ autoOpen: false });
+  const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
+  try {
+    await client.call('Runtime.enable').catch(() => {});
+    await client.call('Page.enable').catch(() => {});
+    await client.call('Page.bringToFront').catch(() => {});
+    await client.call('Input.setIgnoreInputEvents', { ignore: false }).catch(() => {});
+    const navigation = normalizeShowHomeResult(await cdpEvaluate(client, buildShowHomeExpression()));
+    if (!navigation.ok) return navigation;
+    await focusCodexComposerInCdpClient(client).catch(() => {});
+    return navigation;
+  } finally {
+    client.close();
+  }
+}
+
 async function navigateCodexThreadViaDeepLink(threadId = '') {
   if (!isCodexThreadId(threadId)) {
     const error = new Error('A valid Codex task id is required for desktop navigation.');
@@ -6494,6 +6514,27 @@ async function handleNewCodexThread(req, res) {
   try {
     const target = resolveNewThreadTarget(payload);
     const project = classifyThreadProject(target.cwd);
+    if (payload.deferCreate === true) {
+      const navigation = await activateCodexHomeViaExistingCdp();
+      if (!navigation || navigation.ok !== true) {
+        const error = new Error(navigation && navigation.message || 'Codex did not confirm its native new-task screen.');
+        error.code = navigation && navigation.code || 'CODEX_HOME_SELECTION_UNCONFIRMED';
+        error.statusCode = 409;
+        throw error;
+      }
+      return json(res, 200, {
+        ok: true,
+        pending: true,
+        threadId: '',
+        selectedBy: navigation.method,
+        cwd: project.isProjectThread ? target.cwd : '',
+        projectName: project.projectName,
+        projectPath: project.projectPath,
+        projectKey: project.projectKey,
+        scope: project.isProjectThread ? 'project' : 'conversation',
+        message: '已打开 Codex 原生新任务界面；首次发送时创建任务。',
+      });
+    }
     const creation = await desktopInternalRpcAdapter.startThread({
       ...(target.cwd ? { cwd: target.cwd } : {}),
       ephemeral: false,

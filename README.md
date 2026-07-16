@@ -202,6 +202,8 @@ and update `SHA256SUMS.txt`.
 - Reads the authoritative in-window route for desktop-to-phone task synchronization and exact mutation guards.
 - Recognizes the current desktop `Light` and `轻度` reasoning labels while retaining fail-closed selection confirmation.
 - Preserves same-task RPC-confirmed model, reasoning, and speed readback when the desktop trigger temporarily reports only a generic custom label.
+- Opens the native Codex home for deferred new-task creation and gives `thread/start` a bounded initialization timeout when immediate materialization is explicitly requested.
+- Allows an explicitly requested task selection to leave the native home route without inventing a source task, while retaining destination protection checks and window-state restoration.
 
 ### v1.4.2
 

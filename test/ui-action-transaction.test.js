@@ -363,6 +363,44 @@ test('desktop selection transaction permits exact A to B navigation and restores
   assert.equal(win32.currentFocus(), 'editor-input');
 });
 
+test('desktop selection can leave native home without inventing an active source task', async () => {
+  const win32 = createWin32Adapter({ foreground: 'editor-window' });
+  const guardedContexts = [];
+  const baseGuard = createProtectedThreadGuard();
+  const transaction = createTransaction(win32, {
+    guard: {
+      assertAllowed(value) {
+        guardedContexts.push({ ...value });
+        return baseGuard.assertAllowed(value);
+      },
+    },
+    resolveObservedThread: async () => {
+      const error = new Error('native home has no active task');
+      error.code = 'UI_ACTIVE_THREAD_UNKNOWN';
+      throw error;
+    },
+    observedThreadReadyTimeoutMs: 20,
+    sleep: async () => {},
+  });
+  let navigationCalls = 0;
+
+  await transaction.run(context(createExplicitUiIntent({
+    id: 'intent-home-to-task',
+    action: 'thread.openDesktop',
+    threadId: OTHER_THREAD,
+  }), {
+    action: 'thread.openDesktop',
+    threadId: OTHER_THREAD,
+    requireObservedTargetMatch: false,
+  }), async () => {
+    navigationCalls += 1;
+  });
+
+  assert.equal(navigationCalls, 1);
+  assert.ok(guardedContexts.every(value => value.threadId === OTHER_THREAD));
+  assert.deepEqual(win32.currentForeground(), 'editor-window');
+});
+
 test('protected desktop selection target is rejected before discovery or navigation', async () => {
   const win32 = createWin32Adapter();
   let navigationCalls = 0;
