@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.4] - 2026-07-17
+
+This public snapshot corresponds to the internal Codex2Frp 2.4.4 capability line while preserving the public repository's independent version history.
+
+- Model and reasoning settings canonicalize against the live desktop catalog before renderer RPC, including valid single-segment model ids such as `o3`, and expose only efforts supported by the current model.
+- A bounded 15-second confirmation lease prevents an older composer DOM sample from immediately reverting a confirmed model, reasoning, or speed change; matching readback converges early and desktop changes become authoritative after expiry.
+- Loading and control compatibility preserve confirmed settings across older status/config snapshots, reject legacy writes without an exact task id, and isolate per-field confirmations between tasks.
+- Live model metadata retains supported reasoning levels, defaults, speed tiers, and option provenance without guessed choices.
+- Queued first turns can start on newly created desktop tasks during the bounded app-server `notLoaded` initialization state.
+- Desktop-hidden plugin and workspace bootstrap context is removed from phone-visible history and fallback titles without hiding the real user request.
+- Expands the side-effect-free public backend suite to 709 passing tests.
+
 ## [1.4.3] - 2026-07-16
 
 This public snapshot corresponds to the internal Codex2Frp 2.4.3 capability line while preserving the public repository's independent version history.

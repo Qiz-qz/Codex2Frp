@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.3`.
+Current version: `v1.4.4`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.3 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.4 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -28,7 +28,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.3/              Latest public installer release
+release/v1.4.4/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -37,25 +37,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.3/Codex2FrpSetup-v1.4.3.exe
+release/v1.4.4/Codex2FrpSetup-v1.4.4.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.3/SHA256SUMS.txt
+release/v1.4.4/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.3/SHA256SUMS.txt
+release/v1.4.4/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.3.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.4.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -170,7 +170,7 @@ node --check server.js
 npm run windows:installer
 ```
 
-The current side-effect-free public backend suite contains 695 tests. Coverage includes the native focus helper, renderer approval lifecycle and duplicate-response handling, atomic task-scoped confirmed settings, protected-task-safe new-task discovery, exact desktop binding after native task creation, strict process-id filters, and CDP-bound window discovery.
+The current side-effect-free public backend suite contains 709 tests. Coverage includes live model canonicalization, per-field confirmation leases, renderer approval lifecycle and duplicate-response handling, queued first-turn dispatch, protected-task-safe discovery, desktop bootstrap-context filtering, strict process-id filters, and CDP-bound window discovery.
 
 The installer build writes:
 
@@ -197,6 +197,16 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.4
+
+- Canonicalizes model settings against the current desktop catalog before renderer RPC, including valid single-segment ids such as `o3`, and filters reasoning choices to the efforts supported by the selected model.
+- Uses a bounded 15-second confirmation lease for model, reasoning, and speed controls so stale composer samples cannot immediately undo a confirmed phone change; matching desktop readback converges early and later desktop changes become authoritative again.
+- Keeps model, reasoning, and speed timestamps independent and task-scoped, rejects legacy confirmations without an exact task id, and preserves confirmed values across older status/config snapshots.
+- Preserves live model capability metadata and option provenance through loading, status, and config responses instead of inventing unsupported choices.
+- Starts queued first turns on newly created desktop tasks even while the app-server still reports the bounded `notLoaded` initialization state.
+- Removes desktop-hidden plugin and workspace bootstrap context from phone-visible user history and fallback titles while preserving the actual user request.
+- Passes 709 side-effect-free backend tests for the public v1.4.4 source snapshot.
 
 ### v1.4.3
 

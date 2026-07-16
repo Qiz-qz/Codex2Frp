@@ -426,8 +426,8 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(configBody, /cachedLiveModeOptions/, 'ordinary config reads use cached menu choices');
   assert.match(configBody, /matchingOverridesForThread\(controlOverrides, requestedThreadId\)/,
     'config reuses a confirmed setting request only for the exact desktop task that received it');
-  assert.match(configBody, /source: 'confirmed-request'/,
-    'config labels an RPC-confirmed custom setting honestly when the desktop trigger cannot expose its exact value');
+  assert.match(functionBody('controlOverrideModel'), /confirmedModelOverride/,
+    'config delegates confirmed model readback to the exact-thread confirmation helper');
   assert.match(configBody, /Boolean\(confirmedModel \|\| confirmedReasoning \|\| confirmedSpeed\)/,
     'a same-task confirmed setting keeps desktop control ready while the trigger displays a generic custom label');
   assert.match(configBody, /controlOverrideModel\(matchingControlOverrides, \{\}, liveModeOptions\)/,
@@ -438,8 +438,26 @@ test('config and status expose complete Codex client state for mobile', () => {
     'reasoning control response exposes immediate confirmed RPC readback and honest UI wording');
   assert.match(serverSource, /onSettingsConfirmed:\s*writeConfirmedControlSettings/,
     'all desktop internal RPC settings paths persist their confirmed target through one adapter callback');
+  assert.match(serverSource, /normalizeSettings:\s*params\s*=>\s*modelOptionUtils\.canonicalizeThreadSettings\(params,\s*availableModelOptionsForSwitch\(\)\)/,
+    'desktop settings canonicalize visible model labels before invoking the renderer RPC');
   assert.match(functionBody('writeConfirmedControlSettings'), /state\.controlOverrides\s*=\s*next[\s\S]*writeAppState\(state\)/,
     'model, reasoning, and service tier confirmation are persisted in one atomic state write');
+  assert.match(functionBody('writeControlOverride'), /mergeConfirmedControlOverrides/,
+    'legacy confirmations use the same cross-thread field isolation as desktop RPC confirmations');
+  assert.match(functionBody('writeControlOverride'), /if\s*\(!isCodexThreadId\(threadId\)\)[\s\S]*BAD_THREAD_ID/,
+    'legacy confirmations fail closed for an empty or invalid thread before touching state');
+  assert.match(configBody, /preferConfirmedControlValue/,
+    'a newer confirmed settings lease wins over an older exact DOM observation');
+  assert.match(handleStatusBody, /preferConfirmedControlValue/,
+    'status polling cannot let an older snapshot clear a newer confirmed settings lease');
+  for (const body of [configBody, handleStatusBody]) {
+    assert.match(body, /observationSource:\s*nextTurnSettings\.source/,
+      'handlers pass top-level composer provenance into each field lease decision');
+  }
+  assert.doesNotMatch(configBody, /Object\.values\(REASONING_MODE_TARGETS\)/,
+    'config does not statically publish max or ultra for models without authoritative metadata');
+  assert.doesNotMatch(handleStatusBody, /Object\.values\(REASONING_MODE_TARGETS\)/,
+    'status does not statically publish max or ultra for models without authoritative metadata');
   assert.match(handleStatusBody, /cachedLiveModeOptions/, 'status polling uses cached menu choices');
   assert.doesNotMatch(handleStatusBody, /await\s+readLiveCodexModeOptions/, 'status polling must not open Codex mode menus');
   assert.match(controlPortResolverBody, /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'explicit control-port setup refreshes live menu choices without blocking indefinitely');
@@ -650,7 +668,8 @@ test('in-task user guidance stays as user history without splitting the active p
   const userHistoryBody = functionBody('extractUserHistoryMessage');
   assert.match(userHistoryBody, /payload\.type === 'user_message'/, 'ordinary event user messages are included');
   assert.match(userHistoryBody, /payload\.type === 'message'[\s\S]*payload\.role === 'user'/, 'response-item user messages from goal or plan mode are included');
-  assert.match(userHistoryBody, /extractMessageText\(payload\.content\)/, 'response-item user content arrays are converted to display text');
+  assert.match(userHistoryBody, /extractPublicUserHistoryText\(payload\.content\)/,
+    'legacy history removes desktop-hidden bootstrap parts before joining visible user content');
   assert.match(serverSource, /function extractGoalObjectiveText/, 'goal-mode internal context has a dedicated objective extractor');
   assert.match(userHistoryBody, /extractGoalObjectiveText\(rawText\)/, 'goal-mode user messages display only the real objective text');
   assert.doesNotMatch(userHistoryBody, /codex_internal_context[\s\S]*return text/, 'internal goal context is not returned as an ordinary user bubble');
@@ -675,7 +694,7 @@ test('thread fallback titles ignore Codex internal context records', () => {
   assert.match(titleBody, /payload\.type === 'user_message'/, 'ordinary event user messages can still become fallback titles');
   assert.match(titleBody, /payload\.role === 'user'/, 'safe response-item user messages can still become fallback titles');
   assert.match(titleBody, /isInternalCodexTitleText/, 'response-item user messages are filtered before becoming titles');
-  assert.match(internalTitleBody, /environment_context\|turn_aborted\|codex_internal_context/, 'internal context and aborted-turn markers are rejected as thread titles');
+  assert.match(internalTitleBody, /isStrictInternalUserContext/, 'desktop-hidden user bootstrap records are rejected as thread titles');
   assert.match(placeholderBody, /isInternalCodexTitleText\(text\)/, 'internal titles already stored in the Codex index are treated as placeholders');
 });
 
