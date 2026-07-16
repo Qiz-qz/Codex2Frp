@@ -90,6 +90,7 @@ test('normalizes persisted Codex control overrides', () => {
       model: 'gpt-5.4-mini',
       reasoning: 'high',
       speed: 'fast',
+      threadId: 'test-thread-a',
       updatedAt: '2026-06-18T00:00:00.000Z',
       extra: 'ignored'
     }
@@ -99,6 +100,7 @@ test('normalizes persisted Codex control overrides', () => {
     model: 'gpt-5.4-mini',
     reasoning: 'high',
     speed: 'fast',
+    threadId: 'test-thread-a',
     updatedAt: '2026-06-18T00:00:00.000Z'
   });
 
@@ -114,6 +116,7 @@ test('normalizes persisted Codex control overrides', () => {
     model: '',
     reasoning: '',
     speed: '',
+    threadId: '',
     updatedAt: ''
   });
 });

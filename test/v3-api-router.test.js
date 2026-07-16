@@ -267,8 +267,8 @@ test('pending request routes list safe DTOs and respond through the protected co
     url: `/codex/v3/threads/${THREAD}/requests/${pending.handle}/respond`,
     body: { decision: 'decline' },
   });
-  assert.equal(repeated.statusCode, 404);
-  assert.equal(repeated.body.error.code, 'PENDING_REQUEST_NOT_FOUND');
+  assert.equal(repeated.statusCode, 409);
+  assert.equal(repeated.body.error.code, 'PENDING_REQUEST_RESOLVED');
 });
 
 test('pending request responses reject thread mismatch and protected tasks before responding', async () => {
@@ -1001,6 +1001,30 @@ test('queue CRUD, flush, and reconcile are guarded and flush starts turns throug
     'queue.retry',
     'queue.dispatch',
   ]);
+});
+
+test('pending request listing synchronizes the desktop renderer before returning', async () => {
+  const pendingRequestStore = createPendingRequestStore();
+  let synchronizedThreadId = '';
+  pendingRequestStore.setSynchronizer(async threadId => {
+    synchronizedThreadId = threadId;
+    pendingRequestStore.capture({
+      requestId: 'renderer-request',
+      connectionEpoch: 1,
+      connectionSource: 'desktopRenderer',
+      method: 'item/permissions/requestApproval',
+      params: { threadId, permissions: { network: true } },
+      respond: async () => {},
+    });
+  });
+  const { router } = createRouter({
+    pendingRequestStore,
+    pendingRequestCommandCoordinator: new SpyQueueCoordinator(),
+  });
+  const result = await router.handle({ method: 'GET', url: `/codex/v3/threads/${THREAD}/requests` });
+  assert.equal(result.statusCode, 200);
+  assert.equal(synchronizedThreadId, THREAD);
+  assert.equal(result.body.items.length, 1);
 });
 
 test('collaboration catalog returns an authoritative empty list for incomplete new Codex presets', async () => {

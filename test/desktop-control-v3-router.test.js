@@ -14,7 +14,16 @@ function createRuntime() {
     getStatus: () => ({ state: 'ready', ready: true, source: 'desktopInternalRpc' }),
     startThread(params) { calls.push(['startThread', params]); return { thread: { id: THREAD } }; },
     readThread(params) { calls.push(['readThread', params]); return { thread: { id: THREAD, turns: [] } }; },
-    updateThreadSettings(params) { calls.push(['updateThreadSettings', params]); return {}; },
+    updateThreadSettings(params) {
+      calls.push(['updateThreadSettings', params]);
+      return {
+        target: {
+          source: 'desktopInternalRpc',
+          threadId: params.threadId,
+          settings: { model: params.model, effort: params.effort },
+        },
+      };
+    },
     startTurn(params) { calls.push(['startTurn', params]); return { turn: { id: 'turn-1' } }; },
     interruptTurn(params) { calls.push(['interruptTurn', params]); return {}; },
   };
@@ -62,9 +71,14 @@ test('v3 desktop controls preserve confirmed response envelopes for every mobile
     status: 'confirmed',
     operation: 'thread.settings',
     observation: {
-      source: 'confirmedRequest',
+      source: 'desktopInternalRpc',
       readbackSupported: false,
       settings: { model: 'gpt-5.5', effort: 'high' },
+      target: {
+        source: 'desktopInternalRpc',
+        threadId: THREAD,
+        settings: { model: 'gpt-5.5', effort: 'high' },
+      },
     },
   });
   assert.deepEqual(started.body, {

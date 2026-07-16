@@ -81,6 +81,7 @@ function createHarness(options = {}) {
     bridgeOperations: ['turn.queueNext'],
     notificationSink: options.notificationSink,
     serverRequestSink: options.serverRequestSink,
+    serverRequestLifecycleSink: options.serverRequestLifecycleSink,
     confirmedNativeControls: options.confirmedNativeControls,
   });
   return { runtime, processManager, services, factoryCalls };
@@ -158,6 +159,7 @@ test('runtime forwards server requests through a private one-request response cl
   assert.equal(serverRequests[0].method, 'item/tool/requestUserInput');
   assert.deepEqual(serverRequests[0].params, { syntheticQuestion: 'fixture-only' });
   assert.equal(serverRequests[0].connectionEpoch, 1);
+  assert.equal(serverRequests[0].requestId, 'private-server-request-id');
   assert.equal(Object.hasOwn(serverRequests[0], 'id'), false);
   assert.equal(typeof serverRequests[0].respond, 'function');
   assert.equal(JSON.stringify(harness.runtime.getMeta()).includes('fixture-only'), false);
@@ -248,6 +250,30 @@ test('metadata and capabilities are available without starting app-server or exp
   assert.equal(meta.capabilities.operations['thread.list'].reason, 'runtime_not_ready');
   assert.equal(meta.capabilities.operations['turn.queueNext'].mode, 'bridge');
   assert.equal(meta.capabilities.operations['composer.plus'].mode, 'unavailable');
+});
+
+test('runtime reports closed request epochs exactly once on stop and process exit', async () => {
+  const lifecycle = [];
+  const harness = createHarness({
+    serverRequestLifecycleSink: event => lifecycle.push(event),
+  });
+  await harness.runtime.ensureStarted();
+  assert.equal(harness.runtime.stop(), true);
+  assert.deepEqual(lifecycle, [{ type: 'connectionClosed', connectionEpoch: 1 }]);
+
+  harness.processManager.emit('exit', {
+    pid: 4101, connectionEpoch: 1, code: 0, signal: 'SIGTERM',
+  });
+  assert.deepEqual(lifecycle, [{ type: 'connectionClosed', connectionEpoch: 1 }]);
+
+  await harness.runtime.ensureStarted();
+  harness.processManager.emit('exit', {
+    pid: 4102, connectionEpoch: 2, code: 1, signal: null,
+  });
+  assert.deepEqual(lifecycle, [
+    { type: 'connectionClosed', connectionEpoch: 1 },
+    { type: 'connectionClosed', connectionEpoch: 2 },
+  ]);
 });
 
 test('runtime readiness dynamically enables negotiated methods without version checks', async () => {

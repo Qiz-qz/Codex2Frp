@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.2`.
+Current version: `v1.4.3`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.2 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.3 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -13,6 +13,7 @@ This public release corresponds to the feature set developed on the internal Cod
 - Ships a Windows control panel for starting and stopping the local backend, copying access links, saving a remote-link route, opening logs, and enabling Codex control.
 - Uses Codex Desktop through the real UI when sending text or changing model, reasoning, speed, and composer menu actions.
 - Keeps passive `/codex/status` and `/codex/config` polling read-only; those calls do not open Codex menus or launch extra Codex clients.
+- Uses a hash-versioned native Windows focus helper for explicit controls, avoiding repeated PowerShell startup and C# compilation while keeping every operation payload on stdin.
 - Supports local, LAN, and manually configured remote-link routes.
 
 Codex2Frp is not a hosted chat service and does not include a model. It operates your local Codex Desktop session.
@@ -27,7 +28,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.2/              Latest public installer release
+release/v1.4.3/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -36,25 +37,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.2/Codex2FrpSetup-v1.4.2.exe
+release/v1.4.3/Codex2FrpSetup-v1.4.3.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.2/SHA256SUMS.txt
+release/v1.4.3/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.2/SHA256SUMS.txt
+release/v1.4.3/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.2.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.3.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -169,6 +170,8 @@ node --check server.js
 npm run windows:installer
 ```
 
+The current side-effect-free public backend suite contains 695 tests. Coverage includes the native focus helper, renderer approval lifecycle and duplicate-response handling, atomic task-scoped confirmed settings, protected-task-safe new-task discovery, exact desktop binding after native task creation, strict process-id filters, and CDP-bound window discovery.
+
 The installer build writes:
 
 ```text
@@ -194,6 +197,19 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.3
+
+- Binds explicit phone controls to the Codex renderer process verified for the active CDP port, preventing another Codex window from receiving the action.
+- Uses Codex's native `windows.show_thread` renderer action with exact route readback, so task selection works even when no matching sidebar row is mounted.
+- Reads the authoritative in-window route for desktop-to-phone task synchronization and exact mutation guards.
+- Recognizes the current desktop `Light` and `轻度` reasoning labels while retaining fail-closed selection confirmation.
+- Preserves same-task RPC-confirmed model, reasoning, and speed readback when the desktop trigger temporarily reports only a generic custom label.
+- Opens the native Codex home for deferred new-task creation and gives `thread/start` a bounded initialization timeout when immediate materialization is explicitly requested.
+- Allows an explicitly requested task selection to leave the native home route without inventing a source task, while retaining destination protection checks and window-state restoration.
+- Uses a SHA-256-named native focus helper for cached explicit-control operations, with atomic compilation, bounded corrupt-cache recovery, stdin-only request payloads, and no shell invocation.
+- Filters CDP-bound native window discovery by the verified renderer process before reading unrelated process names or window titles.
+- Passes 695 side-effect-free backend tests for the public v1.4.3 source snapshot.
 
 ### v1.4.2
 

@@ -120,6 +120,31 @@ test('settings without authoritative readback return confirmed-request shadow pr
   assert.deepEqual(calls, [request]);
 });
 
+test('settings expose the exact desktop RPC sourced target returned by the adapter', async () => {
+  const controls = createConfirmedControls({
+    async updateThreadSettings() {
+      return {
+        target: {
+          source: 'desktopInternalRpc',
+          threadId: '11111111-2222-4333-8444-555555555555',
+          model: 'gpt-5.5',
+          effort: 'high',
+        },
+      };
+    },
+  });
+
+  const response = await controls.updateThreadSettings({
+    threadId: '11111111-2222-4333-8444-555555555555',
+    model: 'gpt-5.5',
+    effort: 'high',
+  });
+  assert.equal(response.observation.source, 'desktopInternalRpc');
+  assert.equal(response.observation.target.source, 'desktopInternalRpc');
+  assert.equal(response.observation.target.model, 'gpt-5.5');
+  assert.equal(response.observation.target.effort, 'high');
+});
+
 test('turn start confirmation exposes a stable turn id observation', async () => {
   const controls = createConfirmedControls({
     async startTurn() { return { turn: { id: 'turn-1' } }; },

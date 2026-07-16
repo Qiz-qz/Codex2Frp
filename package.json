@@ -20,7 +20,7 @@
   },
   "private": true,
   "name": "codex2frp",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Windows local Codex bridge with remote-link access",
   "license": "SEE LICENSE IN LICENSE"
 }

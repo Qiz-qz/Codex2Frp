@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   DesktopInternalRpcAdapter,
+  THREAD_START_TIMEOUT_MS,
   desktopRpcExpression,
   unwrapDesktopRpcResponse,
 } = require('../lib/control/desktop-internal-rpc-adapter');
@@ -24,6 +25,21 @@ test('desktop RPC expression uses the installed electron bridge and matches one 
   assert.match(expression, /message\.id/);
   assert.match(expression, /data\.message\s*\|\|\s*data\.response/);
   assert.doesNotMatch(expression, /querySelector|\.click\(|dispatchEvent\(new (?:Mouse|Pointer|Keyboard)Event/);
+});
+
+test('thread start allows the current desktop enough time to initialize a new task', async () => {
+  const observations = [];
+  const adapter = new DesktopInternalRpcAdapter({
+    timeoutMs: 4500,
+    evaluate: async (expression, options) => {
+      observations.push({ expression, options });
+      return { ok: true, result: { thread: { id: THREAD } } };
+    },
+  });
+
+  await adapter.startThread({ cwd: 'E:\\workspace' });
+  assert.equal(observations[0].options.timeoutMs, THREAD_START_TIMEOUT_MS + 250);
+  assert.match(observations[0].expression, new RegExp(`const timeoutMs = ${THREAD_START_TIMEOUT_MS}`));
 });
 
 test('desktop response parser accepts both installed renderer wrappers and rejects cross-host replies', () => {
@@ -71,6 +87,59 @@ test('desktop adapter maps every supported control to the desktop renderer RPC p
     'turn/start',
     'turn/interrupt',
   ]);
+});
+
+test('desktop settings persist one confirmed target only after the renderer RPC succeeds', async () => {
+  const confirmations = [];
+  const adapter = new DesktopInternalRpcAdapter({
+    evaluate: async () => ({ ok: true, result: { accepted: true } }),
+    onSettingsConfirmed: async (params, result) => {
+      confirmations.push({ params, result });
+      return {
+        source: 'desktopInternalRpc',
+        threadId: params.threadId,
+        model: params.model,
+        effort: params.effort,
+        serviceTier: params.serviceTier,
+      };
+    },
+  });
+
+  const result = await adapter.updateThreadSettings({
+    threadId: THREAD,
+    model: 'gpt-5.5',
+    effort: 'high',
+    serviceTier: 'priority',
+  });
+
+  assert.deepEqual(confirmations, [{
+    params: { threadId: THREAD, model: 'gpt-5.5', effort: 'high', serviceTier: 'priority' },
+    result: { accepted: true },
+  }]);
+  assert.deepEqual(result, {
+    accepted: true,
+    target: {
+      source: 'desktopInternalRpc',
+      threadId: THREAD,
+      model: 'gpt-5.5',
+      effort: 'high',
+      serviceTier: 'priority',
+    },
+  });
+});
+
+test('desktop settings never persist a confirmation when the renderer RPC fails', async () => {
+  let confirmations = 0;
+  const adapter = new DesktopInternalRpcAdapter({
+    evaluate: async () => ({ ok: false, code: 'DESKTOP_RPC_ERROR', message: 'rejected' }),
+    onSettingsConfirmed: async () => { confirmations += 1; },
+  });
+
+  await assert.rejects(
+    adapter.updateThreadSettings({ threadId: THREAD, model: 'gpt-5.5' }),
+    error => error.code === 'DESKTOP_RPC_ERROR',
+  );
+  assert.equal(confirmations, 0);
 });
 
 test('desktop adapter fails honestly when CDP or the renderer bridge is unavailable', async () => {
@@ -129,4 +198,27 @@ test('protected desktop task remains readable but cannot be mutated through inte
     error => error.code === 'PROTECTED_THREAD',
   );
   assert.equal(evaluations, 1, 'guard rejects mutation before any desktop RPC request');
+});
+
+test('desktop adapter installs request observation before sending renderer RPC', async () => {
+  const order = [];
+  const adapter = new DesktopInternalRpcAdapter({
+    beforeInvoke: async descriptor => order.push(`before:${descriptor.method}`),
+    evaluate: async () => {
+      order.push('evaluate');
+      return { ok: true, result: { turn: { id: 'turn-1' } } };
+    },
+  });
+  await adapter.startTurn({ threadId: THREAD, input: [{ type: 'text', text: 'test' }] });
+  assert.deepEqual(order, ['before:turn/start', 'evaluate']);
+});
+
+test('desktop adapter does not send RPC when request observation cannot be installed', async () => {
+  let evaluations = 0;
+  const adapter = new DesktopInternalRpcAdapter({
+    beforeInvoke: async () => { throw new Error('renderer listener unavailable'); },
+    evaluate: async () => { evaluations += 1; return { ok: true, result: {} }; },
+  });
+  await assert.rejects(adapter.startTurn({ threadId: THREAD, input: [] }), /renderer listener unavailable/);
+  assert.equal(evaluations, 0);
 });

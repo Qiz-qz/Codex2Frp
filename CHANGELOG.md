@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.3] - 2026-07-16
+
+This public snapshot corresponds to the internal Codex2Frp 2.4.3 capability line while preserving the public repository's independent version history.
+
+- Binds explicit UI and process-control transactions to the Codex window owned by the process verified for the controlled CDP port.
+- Selects tasks through the renderer-native `windows.show_thread` action and exact route readback instead of requiring a mounted sidebar row or dispatching a system-wide deep link.
+- Reads the authoritative in-window route summary for bidirectional task synchronization and exact protected-task mutation guards.
+- Recognizes the current desktop `Light` and `轻度` reasoning labels while preserving exact selected-effort confirmation.
+- Stores confirmed control overrides against the exact task and uses them as explicitly labeled readback only when that same task's desktop trigger exposes no exact value.
+- Preserves native plus-button semantics through renderer-bound `windows.show_home`, while immediate `thread/start` receives a dedicated bounded initialization timeout.
+- Lets `thread.openDesktop` leave the native home route without fabricating an active source task; the requested destination remains protected before discovery and again under the global UI lock.
+- Keeps unsupported, mismatched, and unconfirmed navigation or control results fail closed.
+- Replaces per-operation PowerShell startup and C# recompilation with a SHA-256-named native focus helper; requests remain on stdin, cache writes are atomic, and a corrupt helper is rebuilt at most once before failing closed.
+- Passes the CDP-bound process id into native window enumeration so unrelated HWNDs are rejected before process-name and title inspection, with process-name caching retained for unbound discovery.
+- Bridges current renderer command, file-change, and permission approvals to paired phones with privacy-safe summaries and stale/duplicate-response protection.
+- Persists RPC-confirmed model, reasoning, and service-tier settings atomically per task.
+- Expands the side-effect-free public backend suite to 695 passing tests, including approval lifecycle, confirmed settings, protected-task-safe new-task discovery, exact desktop binding after native task creation, helper caching, corruption recovery, stdin-only requests, strict process-filter validation, and bound-window filtering.
+
 ## [1.4.2] - 2026-07-16
 
 This public snapshot corresponds to the internal Codex2Frp 2.4.2 capability line while preserving the public repository's independent version history.

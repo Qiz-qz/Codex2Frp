@@ -87,15 +87,19 @@ test('composer actions cover compact, goal, plan, and exact plus menu item entry
 
   const cdpThreadBody = functionBody('activateCodexThreadViaExistingCdp');
   assert.match(cdpThreadBody, /findCodexCdpTarget\(\{\s*autoOpen:\s*false\s*\}\)/, 'thread activation for composer actions requires the existing controlled Codex window');
-  assert.match(cdpThreadBody, /data-app-action-sidebar-thread-id/, 'thread activation clicks Codex sidebar thread rows by id');
-  assert.match(cdpThreadBody, /verifiedSelectionExpression\(\)/, 'thread activation re-reads exact desktop identity after navigation');
-  assert.match(cdpThreadBody, /normalizeCurrentThreadSelection/, 'thread activation normalizes verified route/action UUID evidence');
-  assert.match(cdpThreadBody, /CODEX_THREAD_SELECTION_UNCONFIRMED/, 'an unconfirmed requested UUID has a stable fail-closed code');
+  assert.match(cdpThreadBody, /buildShowThreadExpression\(threadId\)/, 'thread activation invokes the renderer-bound Codex app action');
+  assert.match(cdpThreadBody, /normalizeShowThreadResult/, 'thread activation exact-confirms the app-action route identity');
+  assert.doesNotMatch(cdpThreadBody, /data-app-action-sidebar-thread-id|cdpClickRect/, 'thread activation does not depend on a mounted sidebar row');
+  assert.match(cdpThreadBody, /if \(!navigation\.ok\) return navigation/, 'an unconfirmed requested UUID fails closed');
   assert.doesNotMatch(cdpThreadBody, /openWindowsUri|codexThreadDeepLink/, 'composer thread activation does not use protocol links that can open another client');
 });
 
-test('new thread actions use desktop internal RPC then explicitly synchronize the desktop route', () => {
+test('new thread actions preserve native desktop plus semantics and can explicitly materialize a task', () => {
   const handlerBody = functionBody('handleNewCodexThread');
+  assert.match(handlerBody, /payload\.deferCreate === true[\s\S]*activateCodexHomeViaExistingCdp\(\)/,
+    'mobile top plus can open the renderer-bound native Codex home without creating an empty task');
+  assert.ok(handlerBody.indexOf('payload.deferCreate === true') < handlerBody.indexOf('desktopInternalRpcAdapter.startThread('),
+    'deferred native-home handling returns before the immediate thread creation path');
   assert.match(handlerBody, /desktopInternalRpcAdapter\.startThread\(/, 'new-thread endpoint creates through the desktop app-server connection');
   assert.match(handlerBody, /desktopSelectionAdapter\.openDesktopThread\(threadId\)/, 'new-thread endpoint synchronizes desktop selection through the explicit deep-link transaction');
   assert.match(handlerBody, /THREAD_CREATED_DESKTOP_SELECTION_UNCONFIRMED/, 'failed post-create navigation is reported honestly');
@@ -236,6 +240,19 @@ test('plus menu insertion is verified and can be removed from the Codex composer
   assert.match(functionBody('handleComposerAction'), /payload\.selection[\s\S]*runCodexComposerAction\(threadId,\s*action,\s*target,\s*selection\)/, 'composer action endpoint accepts selection metadata from mobile');
   assert.match(actionBody, /selection:\s*result\.selection/, 'insert action returns the verified composer reference to the mobile client');
   assert.doesNotMatch(actionBody, /case 'plus-menu-item'[\s\S]{0,360}message:\s*`\$\{target\} opened in Codex\.`/, 'insert action does not claim success merely because a menu row was clicked');
+});
+
+test('native first send selects the exact created task in the desktop renderer', () => {
+  const sendBody = functionBody('handleSend');
+  const directSend = sendBody.indexOf('desktopInternalRpcAdapter.send');
+  const exactSelection = sendBody.indexOf('desktopSelectionAdapter.openDesktopThread(direct.threadId)');
+  const response = sendBody.indexOf('desktopSelection,');
+  assert.ok(directSend >= 0 && exactSelection > directSend,
+    'desktop selection follows the native thread and turn creation result');
+  assert.ok(response > exactSelection,
+    'the send response reports exact desktop navigation without hiding delivery success');
+  assert.match(sendBody, /if \(direct\.createdThread === true\)/,
+    'existing-task sends do not perform an unnecessary desktop navigation');
 });
 
 test('thread-scoped model, reasoning, and speed mutations exact-confirm the requested composer first', () => {
@@ -407,6 +424,22 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(configBody, /speedOptions/, 'config exposes speed choices to the App');
   assert.doesNotMatch(configBody, /refreshModes|readLiveCodexModeOptionsBounded/, 'config reads never escalate into focus-changing menu automation');
   assert.match(configBody, /cachedLiveModeOptions/, 'ordinary config reads use cached menu choices');
+  assert.match(configBody, /matchingOverridesForThread\(controlOverrides, requestedThreadId\)/,
+    'config reuses a confirmed setting request only for the exact desktop task that received it');
+  assert.match(configBody, /source: 'confirmed-request'/,
+    'config labels an RPC-confirmed custom setting honestly when the desktop trigger cannot expose its exact value');
+  assert.match(configBody, /Boolean\(confirmedModel \|\| confirmedReasoning \|\| confirmedSpeed\)/,
+    'a same-task confirmed setting keeps desktop control ready while the trigger displays a generic custom label');
+  assert.match(configBody, /controlOverrideModel\(matchingControlOverrides, \{\}, liveModeOptions\)/,
+    'config resolves confirmed custom models against the already-confirmed live catalog');
+  assert.match(functionBody('handleModelSwitch'), /targetModel[\s\S]*桌面内建 RPC 已确认模型切换/,
+    'model control response exposes immediate confirmed RPC readback and honest UI wording');
+  assert.match(functionBody('handleReasoningMode'), /targetReasoningMode[\s\S]*桌面内建 RPC 已确认推理强度切换/,
+    'reasoning control response exposes immediate confirmed RPC readback and honest UI wording');
+  assert.match(serverSource, /onSettingsConfirmed:\s*writeConfirmedControlSettings/,
+    'all desktop internal RPC settings paths persist their confirmed target through one adapter callback');
+  assert.match(functionBody('writeConfirmedControlSettings'), /state\.controlOverrides\s*=\s*next[\s\S]*writeAppState\(state\)/,
+    'model, reasoning, and service tier confirmation are persisted in one atomic state write');
   assert.match(handleStatusBody, /cachedLiveModeOptions/, 'status polling uses cached menu choices');
   assert.doesNotMatch(handleStatusBody, /await\s+readLiveCodexModeOptions/, 'status polling must not open Codex mode menus');
   assert.match(controlPortResolverBody, /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'explicit control-port setup refreshes live menu choices without blocking indefinitely');
@@ -510,6 +543,17 @@ test('status parsing expands beyond the small tail for long active turns', () =>
   assert.match(functionBody('readStatusLinesAdaptive'), /statusTailNeedsExpansion/, 'status reader checks whether the small tail lost the active turn boundary');
   assert.match(functionBody('parseCodexStatus'), /readStatusLinesAdaptive\(file,\s*\{\s*sinceMs\s*\}\)/, 'status parser uses adaptive lines instead of a fixed 5MB tail');
   assert.doesNotMatch(functionBody('parseCodexStatus'), /for \(const line of readTailLines\(file\)\)/, 'status parser no longer depends only on the fixed small tail');
+});
+
+test('new-thread status discovery cannot bind a protected desktop task', () => {
+  const finderBody = functionBody('findLatestCodexSessionFile');
+  const statusBody = functionBody('parseCodexStatus');
+  assert.match(finderBody, /typeof options\.excludeThread === 'function'/,
+    'session discovery accepts an explicit task exclusion predicate');
+  assert.match(finderBody, /excludeThread\(threadId\)/,
+    'session discovery applies the predicate before considering a candidate');
+  assert.match(statusBody, /options\.expectNewThread[\s\S]*threadProtectionRegistry\.isProtected\(threadId\)/,
+    'new-thread watches exclude every protected task from generic session discovery');
 });
 
 test('process image tool calls carry renderable attachment URLs for mobile', () => {
@@ -640,9 +684,9 @@ test('chat-mutating routes invalidate thread cache for realtime mobile state', (
   assert.match(serverSource, /async function readCurrentCodexThreadSelectionViaCdp/, 'backend can read the current desktop thread through existing CDP without launching Codex');
   assert.match(serverSource, /CODEX_CURRENT_THREAD_CACHE_MS/, 'current desktop thread selection is cached briefly');
   assert.match(functionBody('normalizeCurrentThreadSelection'), /normalizeVerifiedDesktopSelection/, 'current selection uses the fail-closed verified UUID normalizer');
-  assert.match(functionBody('readCurrentCodexThreadSelectionEvidenceViaCdp'), /verifiedSelectionExpression\(\)/, 'desktop current-thread reader reuses the verified exact-selection expression');
+  assert.match(functionBody('readCurrentCodexThreadSelectionEvidenceViaCdp'), /buildCurrentThreadExpression\(\)/, 'desktop current-thread reader uses the authoritative renderer route summary');
   assert.doesNotMatch(serverSource, /findCodexThreadIdByVisibleText|document\.querySelector\('main'\)[\s\S]*preview/, 'desktop selection never guesses identity from visible chat text');
-  assert.match(functionBody('activateCodexThreadViaExistingCdp'), /normalizeThreadId\(el\.getAttribute\('data-app-action-sidebar-thread-id'\)\) === threadId/, 'CDP thread activation matches local-prefixed sidebar ids to stored thread ids');
+  assert.match(functionBody('activateCodexThreadViaExistingCdp'), /buildShowThreadExpression\(threadId\)/, 'CDP thread activation uses the window-bound native app action even when the sidebar row is absent');
   assert.match(functionBody('handleThreads'), /consumeDesktopSelectionForSync\(desktopSelectionAdapter\)/, 'production thread sync consumes phone-origin suppression through the selection adapter');
   assert.match(functionBody('handleThreads'), /desktopSelectionSuppressed:\s*sync\.suppressed[\s\S]*!sync\.suppressed/, 'phone-origin confirmation is not echoed as a desktop user switch');
   assert.match(functionBody('handleThreads'), /selectedThreadId[\s\S]*currentThreadId[\s\S]*currentThread[\s\S]*threads/, 'threads endpoint returns the current desktop thread id to mobile clients');

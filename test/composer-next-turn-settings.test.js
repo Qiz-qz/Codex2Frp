@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  reasoningKey,
   resolveNextTurnSettings,
   uniqueCatalogModel,
 } = require('../lib/windows/composer-next-turn-settings');
@@ -137,6 +138,11 @@ test('reasoning selection recognizes installed Chinese 极高 and rejects missin
   }), { requestedThreadId: THREAD_A, catalogOptions: CATALOG, observedAt: OBSERVED_AT });
   assert.equal(missing.available, false);
   assert.equal(missing.reason, 'REASONING_UNAVAILABLE');
+});
+
+test('reasoning selection recognizes current desktop Light labels', () => {
+  assert.equal(reasoningKey('Light'), 'low');
+  assert.equal(reasoningKey('轻度'), 'low');
 });
 
 test('hidden measurement candidates in trigger text cannot override the one visible model and effort label', () => {

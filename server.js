@@ -32,6 +32,7 @@ const {
 const modelOptionUtils = require('./lib/model-options');
 const { isAuthorizedRequest } = require('./lib/security/auth');
 const { selectCodexCdpTarget } = require('./lib/windows/cdp-target');
+const { createBoundCodexWindowDiscovery } = require('./lib/windows/cdp-bound-window-discovery');
 const { resolveNextTurnSettings } = require('./lib/windows/composer-next-turn-settings');
 const { V3ApiRouter } = require('./lib/api/v3-router');
 const {
@@ -44,7 +45,23 @@ const { AppServerRuntime } = require('./lib/app-server/runtime');
 const { PendingRequestStore } = require('./lib/app-server/pending-request-store');
 const { CommandCoordinator } = require('./lib/control/command-coordinator');
 const { DesktopInternalRpcAdapter } = require('./lib/control/desktop-internal-rpc-adapter');
+const { DesktopServerRequestBridge } = require('./lib/control/desktop-server-request-bridge');
 const { DesktopControlRuntime } = require('./lib/control/desktop-control-runtime');
+const {
+  confirmedModelOverride,
+  confirmedReasoningOverride,
+  mergeConfirmedControlOverrides,
+  matchingOverridesForThread,
+  overrideIsFresh,
+} = require('./lib/control/confirmed-control-override');
+const { createCdpBoundThreadNavigator } = require('./lib/control/cdp-bound-thread-navigation');
+const {
+  buildShowThreadExpression,
+  buildShowHomeExpression,
+  buildCurrentThreadExpression,
+  normalizeShowHomeResult,
+  normalizeShowThreadResult,
+} = require('./lib/control/codex-app-action-navigation');
 const { classifyMenuItem, isExecutableMenuItem } = require('./lib/control/composer-menu-classifier');
 const {
   consumeDesktopSelectionForSync,
@@ -207,6 +224,7 @@ let keepAwakeStartedAt = '';
 let codexCdpLaunchPromise = null;
 let codexCdpLastLaunch = { ok: false, at: 0, detail: '' };
 let codexCdpPort = CODEX_CDP_PREFERRED_PORT;
+let codexCdpProcessId = 0;
 let v3QueueDispatchTimer = null;
 const v3QueueDispatchingThreads = new Set();
 
@@ -315,6 +333,26 @@ function handleV3ServerRequest(store, request = {}) {
   return null;
 }
 
+function handleV3Notification(eventRuntime, store, notification = {}) {
+  if (notification.method === 'serverRequest/resolved') {
+    const params = notification.params && typeof notification.params === 'object'
+      ? notification.params
+      : {};
+    store.resolveServerRequest({
+      requestId: params.requestId,
+      threadId: params.threadId,
+      connectionEpoch: notification.connectionEpoch,
+      connectionSource: 'independentAppServer',
+    });
+  }
+  return eventRuntime.ingestRpcNotification(notification);
+}
+
+function handleV3ServerRequestLifecycle(store, event = {}) {
+  if (event.type !== 'connectionClosed') return 0;
+  return store.expireConnectionEpoch(event.connectionEpoch, 'independentAppServer');
+}
+
 function createV3Bridge() {
   const executable = discoverCodexExecutable();
   const cliVersion = detectCodexCliVersion(executable);
@@ -397,8 +435,9 @@ function createV3Bridge() {
       backendVersion: String(packageInfo.version || ''),
       desktopVersion: String(process.env.CODEX2FRP_CODEX_DESKTOP_VERSION || ''),
       cliVersion,
-      notificationSink: notification => eventRuntime.ingestRpcNotification(notification),
+      notificationSink: notification => handleV3Notification(eventRuntime, pendingRequestStore, notification),
       serverRequestSink: request => handleV3ServerRequest(pendingRequestStore, request),
+      serverRequestLifecycleSink: event => handleV3ServerRequestLifecycle(pendingRequestStore, event),
       bridgeOperations: ['turn.queueNext'],
       uiExplicitOperations: ['composer.plus'],
     });
@@ -449,11 +488,21 @@ function createV3Bridge() {
 }
 
 const v3BridgeBase = createV3Bridge();
+const desktopServerRequestBridge = new DesktopServerRequestBridge({
+  evaluate: evaluateCodexDesktopInternalRpc,
+  store: v3BridgeBase.pendingRequestStore,
+  hostId: process.env.CODEX2FRP_DESKTOP_HOST_ID || 'local',
+});
+v3BridgeBase.pendingRequestStore.setSynchronizer(
+  () => desktopServerRequestBridge.synchronize(),
+);
 const desktopInternalRpcAdapter = new DesktopInternalRpcAdapter({
   evaluate: evaluateCodexDesktopInternalRpc,
   guard: v3BridgeBase.guard,
   hostId: process.env.CODEX2FRP_DESKTOP_HOST_ID || 'local',
   timeoutMs: CODEX_CDP_SEND_TIMEOUT_MS,
+  beforeInvoke: () => desktopServerRequestBridge.synchronize(),
+  onSettingsConfirmed: writeConfirmedControlSettings,
 });
 const desktopControlRuntime = new DesktopControlRuntime({
   independentRuntime: v3BridgeBase.runtime,
@@ -481,24 +530,30 @@ const explicitUiProtectedThreadGuard = createDynamicProtectedThreadGuard({
   requireAllowlist: process.env.CODEX2FRP_REQUIRE_ALLOWLIST === '1',
 });
 const explicitWin32FocusAdapter = new Win32FocusAdapter();
+const discoverControlledCodexWindow = createBoundCodexWindowDiscovery({
+  getProcessId: () => codexCdpProcessId,
+});
+const cdpBoundThreadNavigator = createCdpBoundThreadNavigator({
+  activateViaCdp: threadId => activateCodexThreadViaExistingCdp(threadId),
+});
 const uiActionTransaction = new UiActionTransaction({
   adapter: explicitWin32FocusAdapter,
   guard: explicitUiProtectedThreadGuard,
+  discoverWindow: discoverControlledCodexWindow,
   timeoutMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_MS || 15000),
   timeoutGraceMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_GRACE_MS || 2000),
   resolveObservedThread: resolveExplicitUiObservedThread,
 });
 const desktopSelectionAdapter = createDesktopSelectionAdapter({
   observeSource: readCurrentCodexThreadSelectionEvidenceViaCdp,
-  navigate: async ({ threadId }) => {
-    return navigateCodexThreadViaDeepLink(threadId);
-  },
+  navigate: async ({ threadId }) => cdpBoundThreadNavigator(threadId),
   transaction: uiActionTransaction,
   createIntent: createExplicitUiIntent,
 });
 const explicitProcessControlTransaction = new ExplicitProcessControlTransaction({
   adapter: explicitWin32FocusAdapter,
   guard: explicitUiProtectedThreadGuard,
+  discoverWindow: discoverControlledCodexWindow,
   timeoutMs: Number(process.env.CODEX2FRP_PROCESS_CONTROL_TIMEOUT_MS || 60000),
   timeoutGraceMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_GRACE_MS || 2000),
   resolveObservedThread: resolveExplicitProcessObservedThread,
@@ -729,12 +784,13 @@ function writeAppState(state) {
   return normalized;
 }
 
-function writeControlOverride(kind, value) {
+function writeControlOverride(kind, value, threadId = '') {
   const state = readAppState();
   const next = {
     ...(state.controlOverrides || {}),
     updatedAt: new Date().toISOString(),
   };
+  if (isCodexThreadId(threadId)) next.threadId = threadId;
   if (kind === 'model') next.model = String(value || '').trim();
   if (kind === 'reasoning') next.reasoning = String(value || '').trim();
   if (kind === 'speed') next.speed = String(value || '').trim();
@@ -743,23 +799,58 @@ function writeControlOverride(kind, value) {
 }
 
 function controlOverrideIsFresh(overrides = {}, parsedUpdatedAt = '') {
-  const overrideMs = Date.parse(overrides.updatedAt || '');
-  const parsedMs = Date.parse(parsedUpdatedAt || '');
-  if (!Number.isFinite(overrideMs)) return false;
-  if (!Number.isFinite(parsedMs)) return true;
-  return overrideMs >= parsedMs;
+  return overrideIsFresh(overrides, parsedUpdatedAt);
 }
 
-function controlOverrideModel(overrides = {}, parsed = {}) {
-  if (!overrides.model || !controlOverrideIsFresh(overrides, parsed.updatedAt || '')) return null;
-  const model = modelInfoFromId(overrides.model, overrides.updatedAt);
-  return model && model.available ? model : null;
+function writeConfirmedControlSettings(params = {}) {
+  const threadId = String(params.threadId || '').trim();
+  if (!isCodexThreadId(threadId)) return null;
+  const state = readAppState();
+  const model = String(params.model || '').trim();
+  const effort = String(params.effort || '').trim();
+  const serviceTier = String(params.serviceTier || params.service_tier || '').trim();
+  const speed = serviceTier ? speedModeFromValue(serviceTier) : null;
+  const next = mergeConfirmedControlOverrides(state.controlOverrides, {
+    threadId,
+    model,
+    effort,
+    speed: speed && speed.key,
+  }, new Date().toISOString());
+  state.controlOverrides = next;
+  const persisted = writeAppState(state).controlOverrides;
+  const liveModeOptions = cachedLiveModeOptions();
+  const targetModel = model ? controlOverrideModel(persisted, {}, liveModeOptions) : null;
+  const targetReasoningMode = effort ? controlOverrideReasoning(persisted, {}, liveModeOptions) : null;
+  const targetSpeedMode = speed ? controlOverrideSpeed(persisted, {}) : null;
+  return {
+    source: 'desktopInternalRpc',
+    threadId,
+    updatedAt: persisted.updatedAt,
+    settings: {
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+      ...(serviceTier ? { serviceTier } : {}),
+    },
+    ...(targetModel ? { model: targetModel } : {}),
+    ...(targetReasoningMode ? { reasoningMode: targetReasoningMode } : {}),
+    ...(targetSpeedMode ? { speedMode: targetSpeedMode } : {}),
+  };
 }
 
-function controlOverrideReasoning(overrides = {}, parsed = {}) {
-  if (!overrides.reasoning || !controlOverrideIsFresh(overrides, parsed.updatedAt || '')) return null;
-  const mode = reasoningModeFromValue(overrides.reasoning, overrides.updatedAt);
-  return mode && mode.available ? mode : null;
+function controlOverrideModel(overrides = {}, parsed = {}, liveModeOptions = cachedLiveModeOptions()) {
+  return confirmedModelOverride(overrides, {
+    parsedUpdatedAt: parsed.updatedAt || '',
+    liveModeOptions,
+    catalogOptions: readModelCatalogOptions(),
+  });
+}
+
+function controlOverrideReasoning(overrides = {}, parsed = {}, liveModeOptions = cachedLiveModeOptions()) {
+  return confirmedReasoningOverride(overrides, {
+    parsedUpdatedAt: parsed.updatedAt || '',
+    liveModeOptions,
+    fallbackOptions: Object.values(REASONING_MODE_TARGETS),
+  });
 }
 
 function controlOverrideSpeed(overrides = {}, parsed = {}) {
@@ -1195,6 +1286,7 @@ function normalizeComparableMessage(value) {
 
 function findLatestCodexSessionFile(options = {}) {
   const excludeThreadId = isCodexThreadId(options.excludeThreadId) ? options.excludeThreadId : '';
+  const excludeThread = typeof options.excludeThread === 'function' ? options.excludeThread : null;
   const afterMs = Number(options.afterMs) || 0;
   const expectedCwd = validLocalDirectory(options.cwd || '');
   const files = listCodexSessionFiles(afterMs ? { force: true } : {});
@@ -1204,6 +1296,7 @@ function findLatestCodexSessionFile(options = {}) {
       const stat = fs.statSync(file);
       const threadId = threadIdFromSessionFile(file);
       if (excludeThreadId && threadId === excludeThreadId) continue;
+      if (excludeThread && excludeThread(threadId)) continue;
       if (afterMs && stat.mtimeMs < afterMs - 2500) continue;
       const meta = readSessionMeta(file);
       if (!shouldIncludeCodexSessionMeta(meta, options)) continue;
@@ -1575,7 +1668,7 @@ async function readCurrentCodexThreadSelectionEvidenceViaCdp() {
   try {
     await client.call('Runtime.enable').catch(() => {});
     await client.call('Page.enable').catch(() => {});
-    return await cdpEvaluate(client, verifiedSelectionExpression());
+    return await cdpEvaluate(client, buildCurrentThreadExpression());
   } finally {
     client.close();
   }
@@ -3148,6 +3241,15 @@ function parseCodexStatus(options = {}) {
   const file = requestedFile || (wantsExactSession ? null : findLatestCodexSessionFile({
     afterMs: options.expectNewThread ? sinceMs : 0,
     excludeThreadId: options.excludeThreadId || '',
+    excludeThread: options.expectNewThread
+      ? threadId => {
+        try {
+          return threadProtectionRegistry.isProtected(threadId);
+        } catch {
+          return true;
+        }
+      }
+      : null,
     cwd: options.cwd || '',
   }));
   if (!file) {
@@ -6045,7 +6147,7 @@ async function readCodexComposerModeStateViaCdp(options = {}) {
   const client = await connectCdpWebSocket(target.webSocketDebuggerUrl, options.timeoutMs || CODEX_CDP_SEND_TIMEOUT_MS);
   try {
     await client.call('Runtime.enable').catch(() => {});
-    return await cdpEvaluate(client, `(() => {
+    return await cdpEvaluate(client, `(async () => {
       const visible = el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -6056,7 +6158,7 @@ async function readCodexComposerModeStateViaCdp(options = {}) {
         el.getAttribute('aria-label') || '',
         el.getAttribute('title') || '',
       ].join(' ').replace(/\\s+/g, ' ').trim();
-      const selectionEvidenceBefore = ${verifiedSelectionExpression()};
+      const selectionEvidenceBefore = await ${buildCurrentThreadExpression()};
       const triggers = [...document.querySelectorAll('button[data-codex-intelligence-trigger="true"]')]
         .filter(visible)
         .map(el => {
@@ -6072,7 +6174,7 @@ async function readCodexComposerModeStateViaCdp(options = {}) {
             state: el.getAttribute('data-state') || '',
           };
         });
-      const selectionEvidenceAfter = ${verifiedSelectionExpression()};
+      const selectionEvidenceAfter = await ${buildCurrentThreadExpression()};
       return { selectionEvidenceBefore, selectionEvidenceAfter, triggers };
     })()`);
   } finally {
@@ -6160,62 +6262,32 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
     await client.call('Page.enable').catch(() => {});
     await client.call('Page.bringToFront').catch(() => {});
     await client.call('Input.setIgnoreInputEvents', { ignore: false }).catch(() => {});
-    const row = await cdpEvaluate(client, `(() => {
-      const threadId = ${JSON.stringify(threadId)};
-      const visible = el => {
-        const rect = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return rect.width > 0 && rect.height > 0 &&
-          rect.bottom >= 0 && rect.y <= innerHeight &&
-          rect.right >= 0 && rect.x <= innerWidth &&
-          style.display !== 'none' && style.visibility !== 'hidden';
-      };
-      const rectOf = el => {
-        const rect = el.getBoundingClientRect();
-        return {
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          w: Math.round(rect.width),
-          h: Math.round(rect.height),
-          right: Math.round(rect.right),
-          bottom: Math.round(rect.bottom),
-        };
-      };
-      const normalizeThreadId = value => {
-        const match = String(value || '').trim().match(/(?:^|:)([a-f0-9]{8}-[a-f0-9-]{27,})$/i);
-        return match ? match[1] : '';
-      };
-      const row = [...document.querySelectorAll('[data-app-action-sidebar-thread-id]')]
-        .filter(visible)
-        .find(el => normalizeThreadId(el.getAttribute('data-app-action-sidebar-thread-id')) === threadId);
-      if (!row) return null;
-      return {
-        text: (row.textContent || '').replace(/\\s+/g, ' ').trim(),
-        active: row.getAttribute('data-app-action-sidebar-thread-active') === 'true',
-        rect: rectOf(row),
-      };
-    })()`);
-    if (!row || !row.rect) {
-      return { ok: false, code: 'CODEX_THREAD_ROW_NOT_FOUND', threadId };
-    }
-    if (row.active !== true) {
-      await cdpClickRect(client, row.rect);
-      await delay(CODEX_DEEPLINK_SETTLE_MS);
-    }
-    const observed = normalizeCurrentThreadSelection(
-      await cdpEvaluate(client, verifiedSelectionExpression()),
+    const navigation = normalizeShowThreadResult(
+      await cdpEvaluate(client, buildShowThreadExpression(threadId)),
+      threadId,
     );
-    if (!observed || observed.threadId !== threadId) {
-      return {
-        ok: false,
-        code: 'CODEX_THREAD_SELECTION_UNCONFIRMED',
-        threadId,
-        observedThreadId: observed && observed.threadId || '',
-      };
-    }
+    if (!navigation.ok) return navigation;
     await focusCodexComposerInCdpClient(client).catch(() => {});
     lastCodexThreadActivation = { threadId, at: Date.now() };
-    return { ok: true, threadId, selected: row };
+    return navigation;
+  } finally {
+    client.close();
+  }
+}
+
+async function activateCodexHomeViaExistingCdp() {
+  await restoreCodexDesktopWindow();
+  const target = await findCodexCdpTarget({ autoOpen: false });
+  const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
+  try {
+    await client.call('Runtime.enable').catch(() => {});
+    await client.call('Page.enable').catch(() => {});
+    await client.call('Page.bringToFront').catch(() => {});
+    await client.call('Input.setIgnoreInputEvents', { ignore: false }).catch(() => {});
+    const navigation = normalizeShowHomeResult(await cdpEvaluate(client, buildShowHomeExpression()));
+    if (!navigation.ok) return navigation;
+    await focusCodexComposerInCdpClient(client).catch(() => {});
+    return navigation;
   } finally {
     client.close();
   }
@@ -6527,6 +6599,27 @@ async function handleNewCodexThread(req, res) {
   try {
     const target = resolveNewThreadTarget(payload);
     const project = classifyThreadProject(target.cwd);
+    if (payload.deferCreate === true) {
+      const navigation = await activateCodexHomeViaExistingCdp();
+      if (!navigation || navigation.ok !== true) {
+        const error = new Error(navigation && navigation.message || 'Codex did not confirm its native new-task screen.');
+        error.code = navigation && navigation.code || 'CODEX_HOME_SELECTION_UNCONFIRMED';
+        error.statusCode = 409;
+        throw error;
+      }
+      return json(res, 200, {
+        ok: true,
+        pending: true,
+        threadId: '',
+        selectedBy: navigation.method,
+        cwd: project.isProjectThread ? target.cwd : '',
+        projectName: project.projectName,
+        projectPath: project.projectPath,
+        projectKey: project.projectKey,
+        scope: project.isProjectThread ? 'project' : 'conversation',
+        message: '已打开 Codex 原生新任务界面；首次发送时创建任务。',
+      });
+    }
     const creation = await desktopInternalRpcAdapter.startThread({
       ...(target.cwd ? { cwd: target.cwd } : {}),
       ephemeral: false,
@@ -6917,7 +7010,7 @@ async function switchCodexGuiModel(threadId = '', targetKey = '') {
   const configTargetModel = await trySwitchCodexModelViaConfig(liveTargetModel || target);
   const finalTargetModel = liveTargetModel || configTargetModel;
   assertExplicitUiActionNotAborted();
-  writeControlOverride('model', finalTargetModel.id || target.id || target.key || target.displayName || targetKey);
+  writeControlOverride('model', finalTargetModel.id || target.id || target.key || target.displayName || targetKey, threadId);
 
   return {
     ok: true,
@@ -7025,7 +7118,7 @@ async function switchCodexReasoningMode(threadId = '', targetKey = '') {
   const configTargetReasoning = await trySwitchCodexReasoningViaConfig(liveTargetReasoning || target);
   const finalTargetReasoning = liveTargetReasoning || configTargetReasoning;
   assertExplicitUiActionNotAborted();
-  writeControlOverride('reasoning', finalTargetReasoning.key || target.key || target.value);
+  writeControlOverride('reasoning', finalTargetReasoning.key || target.key || target.value, threadId);
 
   return {
     ok: true,
@@ -7113,7 +7206,7 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
   const configTargetSpeed = await trySwitchCodexSpeedViaConfig(liveTargetSpeed || target);
   const finalTargetSpeed = liveTargetSpeed || configTargetSpeed;
   assertExplicitUiActionNotAborted();
-  writeControlOverride('speed', finalTargetSpeed.key || target.key || target.value);
+  writeControlOverride('speed', finalTargetSpeed.key || target.key || target.value, threadId);
 
   return {
     ok: true,
@@ -7499,8 +7592,17 @@ async function handleModelSwitch(req, res) {
     }
     const modelId = String(model.id || model.key).trim();
     const rpc = await desktopInternalRpcAdapter.updateThreadSettings({ threadId, model: modelId });
-    writeControlOverride('model', modelId);
-    return json(res, 200, { ok: true, threadId, model: modelId, rpc, verifiedBy: 'desktop-internal-rpc' });
+    const overrides = matchingOverridesForThread(readAppState().controlOverrides || {}, threadId);
+    const targetModel = controlOverrideModel(overrides, {}, cachedLiveModeOptions());
+    return json(res, 200, {
+      ok: true,
+      threadId,
+      model: modelId,
+      targetModel,
+      rpc,
+      verifiedBy: 'desktop-internal-rpc',
+      message: 'Codex 桌面内建 RPC 已确认模型切换。',
+    });
   } catch (error) {
     const status = Number(error && (error.statusCode || error.status));
     if (status) {
@@ -7534,8 +7636,17 @@ async function handleReasoningMode(req, res) {
       return json(res, 400, { ok: false, code: 'BAD_REASONING_MODE', message: '推理强度不正确。' });
     }
     const rpc = await desktopInternalRpcAdapter.updateThreadSettings({ threadId, effort });
-    writeControlOverride('reasoning', effort);
-    return json(res, 200, { ok: true, threadId, effort, rpc, verifiedBy: 'desktop-internal-rpc' });
+    const overrides = matchingOverridesForThread(readAppState().controlOverrides || {}, threadId);
+    const targetReasoningMode = controlOverrideReasoning(overrides, {}, cachedLiveModeOptions());
+    return json(res, 200, {
+      ok: true,
+      threadId,
+      effort,
+      targetReasoningMode,
+      rpc,
+      verifiedBy: 'desktop-internal-rpc',
+      message: 'Codex 桌面内建 RPC 已确认推理强度切换。',
+    });
   } catch (error) {
     const status = Number(error && (error.statusCode || error.status));
     if (status) {
@@ -7572,7 +7683,6 @@ async function handleSpeedMode(req, res) {
       threadId,
       serviceTier: speed.serviceTier,
     });
-    writeControlOverride('speed', speed.key);
     return json(res, 200, {
       ok: true,
       threadId,
@@ -7657,6 +7767,7 @@ async function resolveControlPortState(payload, options) {
       error.status = 502;
       throw error;
     }
+    codexCdpProcessId = controlledProcess.processId;
     attachProcessControlReplacement(state, { processId: controlledProcess.processId });
   }
   return state;
@@ -7810,6 +7921,18 @@ async function handleSend(req, res) {
         clientRequestId,
         cwd: expectNewThread ? expectedNewThreadCwd : '',
       });
+      let desktopSelection = null;
+      if (direct.createdThread === true) {
+        try {
+          desktopSelection = await desktopSelectionAdapter.openDesktopThread(direct.threadId);
+        } catch {
+          desktopSelection = {
+            status: 'unavailable',
+            requestedThreadId: direct.threadId,
+            reason: 'desktop_navigation_failed',
+          };
+        }
+      }
       const watch = {
         since: sentAt,
         threadId: direct.threadId,
@@ -7826,6 +7949,7 @@ async function handleSend(req, res) {
         threadId: direct.threadId,
         turnId: direct.turnId,
         createdThread: direct.createdThread,
+        desktopSelection,
         attachments: requestAttachments.map(item => ({
           name: String(item && item.name || ''),
           type: String(item && (item.mimeType || item.mime || item.type) || ''),
@@ -8102,17 +8226,28 @@ async function handleClientConfig(req, res) {
   const configSpeed = speedModeFromValue(tomlStringValue(configText, 'service_tier'));
   const requestedThreadId = url.searchParams.get('thread') || '';
   const nextTurnSettings = await readLiveCodexComposerModeState({ threadId: requestedThreadId });
+  const liveModeOptions = cachedLiveModeOptions();
+  const controlOverrides = readAppState().controlOverrides || {};
+  const matchingControlOverrides = matchingOverridesForThread(controlOverrides, requestedThreadId);
+  const confirmedModel = controlOverrideModel(matchingControlOverrides, {}, liveModeOptions);
+  const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {}, liveModeOptions);
+  const confirmedSpeed = controlOverrideSpeed(matchingControlOverrides, {});
   const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
     ? nextTurnSettings.model
-    : modelInfoFromId('');
+    : confirmedModel
+      ? { ...confirmedModel, source: 'confirmed-request' }
+      : modelInfoFromId('');
   const currentReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
     ? nextTurnSettings.reasoningMode
-    : reasoningModeFromValue('');
+    : confirmedReasoning
+      ? { ...confirmedReasoning, source: 'confirmed-request' }
+      : reasoningModeFromValue('');
   const currentSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
     ? nextTurnSettings.speed
-    : speedModeFromValue('');
+    : confirmedSpeed
+      ? { ...confirmedSpeed, source: 'confirmed-request' }
+      : speedModeFromValue('');
   const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
-  const liveModeOptions = cachedLiveModeOptions();
   const modelOptions = modelOptionsForClient(liveModeOptions);
   const reasoningOptions = liveModeOptions && Array.isArray(liveModeOptions.reasoningOptions) && liveModeOptions.reasoningOptions.length
     ? liveModeOptions.reasoningOptions
@@ -8137,7 +8272,7 @@ async function handleClientConfig(req, res) {
     controlPort: {
       host: CODEX_CDP_HOST,
       port: codexCdpPort,
-      ready: nextTurnSettings.available === true,
+      ready: nextTurnSettings.available === true || Boolean(confirmedModel || confirmedReasoning || confirmedSpeed),
       autoOpen: false,
       permissions: [
         '读取 Codex 当前模型、思考强度、速度按钮状态',
