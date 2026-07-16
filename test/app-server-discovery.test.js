@@ -110,6 +110,7 @@ test('profile selection is exact and fails closed for unknown CLI versions', () 
   const known = profileFileForCliVersion('0.144.0-alpha.4');
   assert.equal(path.basename(known), 'v0144-profile.json');
   assert.equal(path.basename(profileFileForCliVersion('0.144.2')), 'v0144_2-profile.json');
+  assert.equal(path.basename(profileFileForCliVersion('0.144.5')), 'v0144_2-profile.json');
   assert.equal(profileFileForCliVersion('0.145.0'), '');
   assert.equal(profileFileForCliVersion(''), '');
 });

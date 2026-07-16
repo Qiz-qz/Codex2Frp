@@ -913,7 +913,7 @@ test('explicit process control rebinds restoration to a restarted Codex HWND wit
   )), false);
 });
 
-test('explicit process control is blocked before discovery for background and protected tasks', async () => {
+test('explicit process control blocks background actions but permits non-mutating enable while protected task is visible', async () => {
   const adapter = createRestartingAdapter();
   const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] });
   const transaction = new ExplicitProcessControlTransaction({ adapter, guard });
@@ -924,17 +924,19 @@ test('explicit process control is blocked before discovery for background and pr
     background: true,
     intent: createExplicitUiIntent({ id: 'process-background', action: 'control.enable', threadId: TEST_THREAD }),
   }, async () => {}), error => error.code === 'UI_BACKGROUND_ACTION_FORBIDDEN');
-  await assert.rejects(transaction.run({
+  assert.deepEqual(adapter.events, []);
+
+  const enabled = await transaction.run({
     action: 'control.enable',
     threadId: PROTECTED_THREAD,
     desktopThreadId: PROTECTED_THREAD,
     intent: createExplicitUiIntent({ id: 'process-protected', action: 'control.enable', threadId: PROTECTED_THREAD }),
-  }, async () => {}), error => error.code === 'PROTECTED_THREAD');
+  }, async () => ({ ready: true }));
 
-  assert.deepEqual(adapter.events, []);
+  assert.deepEqual(enabled.value, { ready: true });
 });
 
-test('process control guard re-resolves the observed desktop task inside the global lock', async () => {
+test('process control guard does not confuse a protected desktop observation with a protected-task mutation', async () => {
   const adapter = createRestartingAdapter();
   const observations = [TEST_THREAD, PROTECTED_THREAD];
   const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED_THREAD] });
@@ -963,8 +965,9 @@ test('process control guard re-resolves the observed desktop task inside the glo
   await new Promise(resolve => setImmediate(resolve));
   releaseFirst();
   await first;
-  await assert.rejects(second, error => error.code === 'PROTECTED_THREAD');
-  assert.equal(secondRan, false);
+  await second;
+  assert.equal(secondRan, true);
+  assert.equal(observations.length, 0);
 });
 
 test('process control restores only the replacement process returned by the restart operation', async () => {

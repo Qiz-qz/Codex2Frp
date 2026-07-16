@@ -73,22 +73,23 @@ test('only the composer plus-menu GET is classified as a read-only UI transactio
   assert.doesNotMatch(contextBody, /composer-action[^}]+access\s*=\s*'readOnly'/s);
 });
 
-test('dispatch marks every legacy UI mutation as explicit and leaves reads/background v3 outside', () => {
+test('dispatch limits explicit UI transactions to controls that really manipulate rendered UI', () => {
   const body = functionBody('dispatchRequest');
   assert.match(body, /const pathname = new URL\(req\.url/);
-  for (const route of [
-    '/send',
-    '/codex/new-thread',
-    '/codex/thread-action',
-    '/codex/composer-plus-menu',
-    '/codex/composer-action',
-    '/codex/model-switch',
-    '/codex/reasoning-mode',
-    '/codex/speed-mode',
-    '/codex/stop',
-  ]) {
+  for (const route of ['/codex/thread-action', '/codex/composer-plus-menu', '/codex/composer-action']) {
     const escaped = route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(body, new RegExp(`pathname === '${escaped}'[^\\n]+handleExplicitUiRequest`), `${route} uses an exact explicit UI route`);
+  }
+  for (const [route, handler] of [
+    ['/send', 'handleSend'],
+    ['/codex/new-thread', 'handleNewCodexThread'],
+    ['/codex/model-switch', 'handleModelSwitch'],
+    ['/codex/reasoning-mode', 'handleReasoningMode'],
+    ['/codex/speed-mode', 'handleSpeedMode'],
+    ['/codex/stop', 'handleStopCodex'],
+  ]) {
+    const escaped = route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(body, new RegExp(`pathname === '${escaped}'[^\\n]+${handler}`), `${route} uses desktop RPC without a UI transaction`);
   }
   assert.match(body, /pathname === '\/codex\/select'[^\n]+handleSelectThread/,
     'desktop selection delegates to the adapter-owned explicit transaction');
@@ -104,13 +105,15 @@ test('legacy send cannot fall through to an unscoped frontmost-window mutation',
   const sendBody = functionBody('handleSend');
   assert.match(contextBody, /pathname === '\/send'[\s\S]*UNSUPPORTED_SEND_TARGET/);
   assert.doesNotMatch(contextBody, /payload\.target && payload\.target !== 'codex'\) return null/);
-  assert.match(sendBody, /payload\.target === 'codex'/);
+  assert.match(sendBody, /payload\.target !== 'codex'[\s\S]*UNSUPPORTED_SEND_TARGET/,
+    'the now zero-focus route rejects frontmost delivery inside its own handler');
 });
 
 test('control-port probing is passive and only an explicit POST may auto-open Codex', () => {
   const resolverBody = functionBody('resolveControlPortState');
   const dispatchBody = functionBody('dispatchRequest');
-  assert.match(resolverBody, /autoOpen:\s*payload\.autoOpen === true/);
+  assert.match(resolverBody, /if \(payload\.autoOpen !== true\) throw error/);
+  assert.match(resolverBody, /autoOpen:\s*true/);
   assert.match(resolverBody, /options\.refreshModeOptions === true[\s\S]*readLiveCodexModeOptionsBounded\(\{ force: true \}\)[\s\S]*cachedLiveModeOptions\(\)/);
   assert.doesNotMatch(resolverBody, /targetUrl|target\s*:\s*result\.target/,
     'control-port responses cannot expose a CDP target path, query, fragment, or task UUID');
@@ -119,13 +122,25 @@ test('control-port probing is passive and only an explicit POST may auto-open Co
   assert.match(source, /else if \(pathname === '\/codex\/control-port'\) \{\s*action = 'control\.enable'/);
 });
 
-test('control-port POST uses explicit process control with a safe first-enable sentinel and rebind result', () => {
+test('control enable reuses healthy CDP but defers a required restart until the desktop task is idle', () => {
+  const body = functionBody('resolveControlPortState');
+  const restartGuard = functionBody('assertCodexControlRestartSafe');
+  assert.match(body, /ensureCodexCdpReady\(\{[\s\S]*autoOpen:\s*false/,
+    'an existing healthy CDP is reused before considering a restart');
+  assert.match(body, /assertCodexControlRestartSafe\(\)/);
+  assert.match(body, /forceRestart:\s*true[\s\S]*autoOpen:\s*true/,
+    'an explicit enable may rebind an idle desktop process');
+  assert.match(restartGuard, /parseCodexStatus/);
+  assert.match(restartGuard, /CODEX_CONTROL_ENABLE_WAIT_FOR_IDLE/);
+  assert.doesNotMatch(restartGuard, /PROTECTED_THREAD/,
+    'restart safety depends on an active turn, not protected-task membership');
+});
+
+test('control-port POST allows protected tasks and still returns a correlated rebind result', () => {
   const body = functionBody('runExplicitProcessControlHttpAction');
   const observedBody = functionBody('resolveExplicitProcessObservedThread');
   assert.match(source, /new ExplicitProcessControlTransaction\(/);
-  assert.match(observedBody, /threadProtectionRegistry\.summary\(\)\.protectedCount/);
-  assert.match(observedBody, /PROTECTED_THREAD_CONTROL_ENABLE_BLOCKED/,
-    'first enable fails safely and explains why when a protected desktop task cannot be verified');
+  assert.doesNotMatch(observedBody, /PROTECTED_THREAD_CONTROL_ENABLE_BLOCKED/);
   assert.match(body, /requestedThreadId \|\| 'desktop-control'/);
   assert.match(body, /explicitProcessControlTransaction\.run/);
   assert.match(body, /attachProcessControlReplacement|captureProcessControlReplacement/);

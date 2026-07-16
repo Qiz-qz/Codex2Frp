@@ -896,6 +896,51 @@ test('projects static exec view_image ImageContent output without retaining the 
   assert.equal(JSON.stringify(image).includes(SYNTHETIC_IMAGE_DIR), false);
 });
 
+test('projects the current view_image wrapper when Codex also reports image detail', () => {
+  const normalizer = createNormalizer();
+  const filePath = `${SYNTHETIC_IMAGE_DIR}\\current-wrapper.png`;
+  const callId = 'exec-current-view-image-wrapper';
+  const call = normalizer.normalize({ type: 'response_item', payload: {
+    type: 'custom_tool_call', name: 'exec', call_id: callId, status: 'completed',
+    input: `const r=await tools.view_image({path:${JSON.stringify(filePath)},detail:"original"}); image(r.image_url); text(r.detail)`,
+    internal_chat_message_metadata_passthrough: { turn_id: 'turn-current-image-wrapper' },
+  } });
+  const image = normalizer.normalize({ type: 'response_item', payload: {
+    type: 'custom_tool_call_output', call_id: callId,
+    output: [
+      { type: 'input_image', image_url: VALID_PNG_DATA_URL },
+      { type: 'input_text', text: 'original' },
+    ],
+    internal_chat_message_metadata_passthrough: { turn_id: 'turn-current-image-wrapper' },
+  } });
+
+  assert.equal(call, null);
+  assert.equal(image.toolKind, 'imageView');
+  assert.equal(image.turnId, 'turn-current-image-wrapper');
+  assert.equal(image.count, 1);
+  assert.equal(image.attachments[0].name, 'current-wrapper.png');
+  assert.equal(getPrivateAttachmentSource(image.attachments[0]), filePath);
+  assert.doesNotMatch(JSON.stringify(image), /base64|original/);
+  assert.equal(JSON.stringify(image).includes(SYNTHETIC_IMAGE_DIR), false);
+});
+
+test('current view_image detail wrapper still fails closed when the detail belongs to another value', () => {
+  const normalizer = createNormalizer();
+  const callId = 'exec-mismatched-view-image-detail';
+  normalizer.normalize({ type: 'response_item', payload: {
+    type: 'custom_tool_call', name: 'exec', call_id: callId,
+    input: `const r=await tools.view_image({path:${JSON.stringify(`${SYNTHETIC_IMAGE_DIR}\\mismatch.png`)}}); image(r.image_url); text(other.detail)`,
+    internal_chat_message_metadata_passthrough: { turn_id: 'turn-mismatched-image-detail' },
+  } });
+  const image = normalizer.normalize({ type: 'response_item', payload: {
+    type: 'custom_tool_call_output', call_id: callId,
+    output: [{ type: 'input_image', image_url: VALID_PNG_DATA_URL }],
+    internal_chat_message_metadata_passthrough: { turn_id: 'turn-mismatched-image-detail' },
+  } });
+
+  assert.equal(image, null);
+});
+
 test('uses actual ImageContent count for a static multi-view exec and fails closed for unrelated output', () => {
   const normalizer = createNormalizer();
   const paths = ['one.png', 'two.png', 'three.png', 'four.png']

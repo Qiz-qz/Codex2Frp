@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.2] - 2026-07-16
+
+This public snapshot corresponds to the internal Codex2Frp 2.4.2 capability line while preserving the public repository's independent version history.
+
+- Accepts installed Codex CLI 0.144.5 only through the exact pinned 0.144.2/0.144.5 schema hash and critical unions.
+- Adds confirmed renderer-internal RPC controls for task navigation, creation, settings, sending, steering, interruption, archive, rename, pin, and related supported actions.
+- Keeps explicit phone UI work inside focus-safe transactions and restores original foreground, focused HWND, placement, and minimized state.
+- Retains one live desktop-visible reasoning/status row across durable operations until a later visible narrative or terminal event replaces it.
+- Preserves desktop adjacency boundaries for commands, file edits, image views, mixed operations, and safe subagent lifecycle updates.
+- Repairs historical image capability URLs by trusting verified supported image magic rather than a misleading legacy suffix, without weakening HEIC/HEIF validation.
+- Strengthens native task selection confirmation, protected-task guards, and capability diagnostics for current Codex Desktop.
+
 ## [1.4.0] - 2026-07-16
 
 This public snapshot corresponds to the internal Codex2Frp 2.4.0 capability line while preserving the public repository's independent version history.

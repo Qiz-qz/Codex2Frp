@@ -79,7 +79,7 @@ test('v0144_2 fixture pins the normalized hash, method inventory, and critical u
   const profile = loadSchemaProfile(PROFILE_0144_2_FILE);
   assert.equal(profile.schemaVersion, '0.144.2');
   assert.equal(profile.schemaHash, '2e30b98331bfd3951d812fe0a9c32f08caeef1e40749f77dc935baef8d33ba54');
-  assert.deepEqual(profile.cliVersions, ['0.144.2']);
+  assert.deepEqual(profile.cliVersions, ['0.144.2', '0.144.5']);
   assert.equal(profile.requestMethods.length, 122);
   assert.equal(profile.notificationMethods.length, 68);
   assert.deepEqual(profile.typeUnions['v2/MessagePhase'], ['commentary', 'final_answer']);

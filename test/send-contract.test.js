@@ -94,17 +94,12 @@ test('composer actions cover compact, goal, plan, and exact plus menu item entry
   assert.doesNotMatch(cdpThreadBody, /openWindowsUri|codexThreadDeepLink/, 'composer thread activation does not use protocol links that can open another client');
 });
 
-test('new thread actions reuse existing CDP client without opening codex protocol windows', () => {
-  assert.match(serverSource, /async function createNewCodexThreadViaExistingCdp/, 'new-thread has a CDP-only creation helper');
-  const createBody = functionBody('createNewCodexThreadViaExistingCdp');
-  assert.match(createBody, /findCodexCdpTarget\(\{\s*autoOpen:\s*false/, 'new-thread creation requires an existing controlled Codex window');
-  assert.match(createBody, /dispatchCodexShortcutInCdpClient\(client,\s*'n'/, 'new-thread creation uses a CDP shortcut in the existing window');
-  assert.doesNotMatch(createBody, /openWindowsUri|activateCodexThread|activateNewCodexThread|activateNewProjectlessCodexThread/, 'new-thread CDP helper never uses codex:// deep links');
-  assert.match(functionBody('dispatchCodexShortcutInCdpClient'), /Input\.dispatchKeyEvent/, 'CDP shortcut helper sends keyboard events through the existing page');
-
+test('new thread actions use desktop internal RPC then explicitly synchronize the desktop route', () => {
   const handlerBody = functionBody('handleNewCodexThread');
-  assert.match(handlerBody, /createNewCodexThreadViaExistingCdp\(target\)/, 'new-thread endpoint uses the CDP-only helper');
-  assert.doesNotMatch(handlerBody, /activateNewCodexThread|activateNewProjectlessCodexThread|openWindowsUri/, 'new-thread endpoint never opens a Codex protocol window');
+  assert.match(handlerBody, /desktopInternalRpcAdapter\.startThread\(/, 'new-thread endpoint creates through the desktop app-server connection');
+  assert.match(handlerBody, /desktopSelectionAdapter\.openDesktopThread\(threadId\)/, 'new-thread endpoint synchronizes desktop selection through the explicit deep-link transaction');
+  assert.match(handlerBody, /THREAD_CREATED_DESKTOP_SELECTION_UNCONFIRMED/, 'failed post-create navigation is reported honestly');
+  assert.doesNotMatch(handlerBody, /dispatchCodexShortcutInCdpClient|Input\.dispatchKeyEvent/, 'new-thread creation does not emulate a keyboard shortcut');
 
   const focusBody = functionBody('focusTarget');
   assert.match(focusBody, /threadId\s*&&\s*isCodexThreadId\(threadId\)/, 'empty-thread sends do not activate codex:// before first message');

@@ -41,27 +41,36 @@ test('protected requested thread rejects mutation before transport or UI callbac
   assert.equal(uiCalls, 0);
 });
 
-test('UI action rejects when protected task is the observed desktop task', async () => {
+test('opening another desktop task is allowed while protected task remains mutation-safe', async () => {
   const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED] });
   const coordinator = new CommandCoordinator({ guard });
   let calls = 0;
 
-  await assert.rejects(
-    coordinator.run({
-      action: 'thread.openDesktop',
-      mode: 'ui',
-      threadId: TEST_THREAD,
-      desktopThreadId: PROTECTED,
-    }, async () => {
-      calls += 1;
-    }),
-    error => expectGuardCode(error, 'PROTECTED_THREAD'),
-  );
+  const result = await coordinator.run({
+    action: 'thread.openDesktop',
+    mode: 'ui',
+    threadId: TEST_THREAD,
+    observedThreadId: PROTECTED,
+    desktopThreadId: PROTECTED,
+  }, async () => {
+    calls += 1;
+    return 'selected';
+  });
 
-  assert.equal(calls, 0);
+  assert.equal(result, 'selected');
+  assert.equal(calls, 1);
+  await assert.rejects(coordinator.run({
+    action: 'thread.openDesktop',
+    mode: 'ui',
+    threadId: PROTECTED,
+    desktopThreadId: TEST_THREAD,
+  }, async () => {
+    calls += 1;
+  }), error => expectGuardCode(error, 'PROTECTED_THREAD'));
+  assert.equal(calls, 1);
 });
 
-test('explicit control enable is allowlisted but remains blocked for protected desktop tasks', async () => {
+test('explicit control enable is non-mutating and remains allowed for protected desktop tasks', async () => {
   const guard = createProtectedThreadGuard({ protectedThreadIds: [PROTECTED] });
   const coordinator = new CommandCoordinator({ guard });
   let calls = 0;
@@ -77,15 +86,18 @@ test('explicit control enable is allowlisted but remains blocked for protected d
   });
   assert.equal(result, 'enabled');
 
-  await assert.rejects(coordinator.run({
+  const protectedResult = await coordinator.run({
     action: 'control.enable',
     mode: 'ui',
-    threadId: TEST_THREAD,
+    threadId: PROTECTED,
+    observedThreadId: PROTECTED,
     desktopThreadId: PROTECTED,
   }, async () => {
     calls += 1;
-  }), error => expectGuardCode(error, 'PROTECTED_THREAD'));
-  assert.equal(calls, 1);
+    return 'enabled-protected';
+  });
+  assert.equal(protectedResult, 'enabled-protected');
+  assert.equal(calls, 2);
 });
 
 test('zero-focus RPC may target an allowlisted task while desktop shows a protected task', async () => {
