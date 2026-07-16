@@ -259,13 +259,12 @@ async function waitForCondition(condition, timeoutMs = 5000) {
   return condition();
 }
 
-test('Codex 0.144.2 negotiates catalogs and confirms disposable start/read in isolated CODEX_HOME', { skip: liveProtectedSkip }, async () => {
+test('current Codex negotiates the pinned 0.144.2-compatible schema and confirms disposable start/read in isolated CODEX_HOME', { skip: liveProtectedSkip }, async () => {
   const executable = discoverCodexExecutable();
   const cliVersion = detectCodexCliVersion(executable);
   const profileFile = profileFileForCliVersion(cliVersion);
   assert.ok(executable, 'a runnable bundled Codex CLI was discovered');
   assert.ok(cliVersion, 'the current CLI version was detected');
-  assert.equal(cliVersion, '0.144.2', 'the live parity gate targets the installed Codex 0.144.2 baseline');
   assert.ok(profileFile, `a schema profile exists for ${cliVersion}`);
 
   const isolatedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex2frp-live-gate-'));

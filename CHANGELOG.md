@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.3] - 2026-07-16
+
+This public snapshot corresponds to the internal Codex2Frp 2.4.3 capability line while preserving the public repository's independent version history.
+
+- Binds explicit UI and process-control transactions to the Codex window owned by the process verified for the controlled CDP port.
+- Selects tasks through the renderer-native `windows.show_thread` action and exact route readback instead of requiring a mounted sidebar row or dispatching a system-wide deep link.
+- Reads the authoritative in-window route summary for bidirectional task synchronization and exact protected-task mutation guards.
+- Recognizes the current desktop `Light` and `轻度` reasoning labels while preserving exact selected-effort confirmation.
+- Stores confirmed control overrides against the exact task and uses them as explicitly labeled readback only when that same task's desktop trigger exposes no exact value.
+- Keeps unsupported, mismatched, and unconfirmed navigation or control results fail closed.
+
 ## [1.4.2] - 2026-07-16
 
 This public snapshot corresponds to the internal Codex2Frp 2.4.2 capability line while preserving the public repository's independent version history.

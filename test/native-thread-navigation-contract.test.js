@@ -15,19 +15,18 @@ function functionBody(name) {
   return source.slice(start, next === -1 ? source.length : next);
 }
 
-test('phone task selection navigates with the native codex deep link and leaves CDP to observation', () => {
-  assert.match(source, /async function navigateCodexThreadViaDeepLink/);
-  const body = functionBody('navigateCodexThreadViaDeepLink');
-  assert.match(body, /codexThreadDeepLink\(threadId\)/);
-  assert.match(body, /openWindowsUri\(deepLink\)/);
-  assert.match(body, /method:\s*'codex-deep-link'/);
-  assert.match(body, /confirmedThreadId:\s*threadId/);
-  assert.doesNotMatch(body, /cdpClickRect|Input\.dispatch|sendWindowsKeys/);
-
+test('phone task selection stays inside the verified CDP process instead of dispatching a system deep link', () => {
   const adapterWiring = source.slice(
     source.indexOf('const desktopSelectionAdapter'),
     source.indexOf('const explicitProcessControlTransaction'),
   );
-  assert.match(adapterWiring, /navigateCodexThreadViaDeepLink\(threadId\)/);
-  assert.doesNotMatch(adapterWiring, /activateCodexThreadViaExistingCdp\(threadId\)/);
+  assert.match(adapterWiring, /navigate:\s*async \(\{ threadId \}\) => cdpBoundThreadNavigator\(threadId\)/);
+  assert.doesNotMatch(adapterWiring, /navigateCodexThreadViaDeepLink\(threadId\)/);
+
+  const activation = functionBody('activateCodexThreadViaExistingCdp');
+  assert.match(activation, /findCodexCdpTarget\(\{ autoOpen: false \}\)/);
+  assert.match(activation, /buildShowThreadExpression\(threadId\)/);
+  assert.match(activation, /normalizeShowThreadResult/);
+  assert.doesNotMatch(activation, /data-app-action-sidebar-thread-id|cdpClickRect/);
+  assert.match(activation, /if \(!navigation\.ok\) return navigation/);
 });

@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.2`.
+Current version: `v1.4.3`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.2 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.3 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -27,7 +27,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.2/              Latest public installer release
+release/v1.4.3/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -36,25 +36,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.2/Codex2FrpSetup-v1.4.2.exe
+release/v1.4.3/Codex2FrpSetup-v1.4.3.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.2/SHA256SUMS.txt
+release/v1.4.3/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.2/SHA256SUMS.txt
+release/v1.4.3/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.2.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.3.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -194,6 +194,14 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.3
+
+- Binds explicit phone controls to the Codex renderer process verified for the active CDP port, preventing another Codex window from receiving the action.
+- Uses Codex's native `windows.show_thread` renderer action with exact route readback, so task selection works even when no matching sidebar row is mounted.
+- Reads the authoritative in-window route for desktop-to-phone task synchronization and exact mutation guards.
+- Recognizes the current desktop `Light` and `轻度` reasoning labels while retaining fail-closed selection confirmation.
+- Preserves same-task RPC-confirmed model, reasoning, and speed readback when the desktop trigger temporarily reports only a generic custom label.
 
 ### v1.4.2
 
