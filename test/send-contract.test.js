@@ -483,6 +483,14 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.doesNotMatch(functionBody('codexModeMenuItems'), /item\.rect\.w < 40/, 'live option discovery does not absorb ordinary sidebar buttons by size');
   assert.match(statusBody, /nextTurnSettings/, 'status separates exact next-turn composer state from session history');
   assert.match(statusBody, /lastTurnSettings/, 'status preserves last-turn settings under an explicitly historical field');
+  assert.match(statusBody, /currentControlValueFromObservations/,
+    'status retains a same-thread observed setting when an exact composer read is temporarily unavailable');
+  assert.match(functionBody('handleClientConfig'), /persistedThreadSettingsFallback\(requestedThreadId\)/,
+    'config polling keeps a requested thread\'s persisted settings instead of reverting to an empty control state');
+  assert.match(functionBody('persistedThreadSettingsFallback'), /fileCacheSignature/,
+    'persisted control fallback is cached by the session file signature and refreshes after desktop writes');
+  assert.match(functionBody('handleThreadHistory'), /INITIAL_HISTORY_PAGE_SIZE/,
+    'a cold mobile history read defaults to a small cursor-paged suffix instead of projecting a full long thread');
   assert.match(statusBody, /liveModeOptions/, 'status returns live Codex menu options to mobile clients');
   assert.match(statusBody, /modelOptions/, 'status exposes live model choices');
   assert.match(statusBody, /speedOptions/, 'status exposes live speed choices');

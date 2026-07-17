@@ -35,20 +35,20 @@ test('confirmed model override resolves exact live ids and keys for mini and Spa
 test('confirmed settings atomically merge all fields without leaking values across threads', () => {
   const updatedAt = '2026-07-16T12:09:00.000Z';
   const sameThread = mergeConfirmedControlOverrides({
-    threadId: 'test-thread-a', model: 'old-model', reasoning: 'low', speed: 'standard', updatedAt: 'old',
+    threadId: 'safe2', model: 'old-model', reasoning: 'low', speed: 'standard', updatedAt: 'old',
   }, {
-    threadId: 'test-thread-a', model: 'gpt-5.5', effort: 'high', speed: 'fast',
+    threadId: 'safe2', model: 'gpt-5.5', effort: 'high', speed: 'fast',
   }, updatedAt);
   assert.deepEqual(sameThread, {
-    threadId: 'test-thread-a', model: 'gpt-5.5', reasoning: 'high', speed: 'fast', updatedAt,
+    threadId: 'safe2', model: 'gpt-5.5', reasoning: 'high', speed: 'fast', updatedAt,
     modelUpdatedAt: updatedAt, reasoningUpdatedAt: updatedAt, speedUpdatedAt: updatedAt,
   });
 
   const otherThread = mergeConfirmedControlOverrides(sameThread, {
-    threadId: 'test-thread-b', model: 'gpt-5.4-mini',
+    threadId: 'safe3', model: 'gpt-5.4-mini',
   }, updatedAt);
   assert.deepEqual(otherThread, {
-    threadId: 'test-thread-b', model: 'gpt-5.4-mini', reasoning: '', speed: '', updatedAt,
+    threadId: 'safe3', model: 'gpt-5.4-mini', reasoning: '', speed: '', updatedAt,
     modelUpdatedAt: updatedAt, reasoningUpdatedAt: '', speedUpdatedAt: '',
   });
 });
@@ -57,10 +57,10 @@ test('single-field confirmations renew only their own lease', () => {
   const modelAt = '2026-07-16T12:08:00.000Z';
   const effortAt = '2026-07-16T12:09:00.000Z';
   const modelOnly = mergeConfirmedControlOverrides({}, {
-    threadId: 'test-thread-a', model: 'gpt-5.6-sol',
+    threadId: 'safe2', model: 'gpt-5.6-sol',
   }, modelAt);
   const effortOnly = mergeConfirmedControlOverrides(modelOnly, {
-    threadId: 'test-thread-a', effort: 'ultra',
+    threadId: 'safe2', effort: 'ultra',
   }, effortAt);
 
   assert.equal(effortOnly.modelUpdatedAt, modelAt);
@@ -181,11 +181,11 @@ test('confirmation TTL is inclusive and future timestamps fail closed', () => {
 });
 
 test('confirmed overrides are exact-thread scoped and expire instead of becoming permanent readback', () => {
-  const override = { threadId: 'test-thread-a', model: 'gpt-5.4-mini', reasoning: 'high', updatedAt: FRESH };
-  assert.equal(matchingOverridesForThread(override, 'test-thread-a'), override);
-  assert.deepEqual(matchingOverridesForThread(override, 'other'), {});
-  assert.equal(confirmedModelOverride(override, { now: NOW + 16 * 60 * 1000 }), null);
-  assert.equal(confirmedModelOverride(override, { now: NOW, parsedUpdatedAt: '2026-07-16T12:09:30.000Z' }), null);
+  const safe2 = { threadId: 'safe2', model: 'gpt-5.4-mini', reasoning: 'high', updatedAt: FRESH };
+  assert.equal(matchingOverridesForThread(safe2, 'safe2'), safe2);
+  assert.deepEqual(matchingOverridesForThread(safe2, 'other'), {});
+  assert.equal(confirmedModelOverride(safe2, { now: NOW + 16 * 60 * 1000 }), null);
+  assert.equal(confirmedModelOverride(safe2, { now: NOW, parsedUpdatedAt: '2026-07-16T12:09:30.000Z' }), null);
 });
 
 test('confirmed reasoning resolves the exact live option with honest RPC provenance', () => {

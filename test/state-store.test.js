@@ -90,7 +90,7 @@ test('normalizes persisted Codex control overrides', () => {
       model: 'gpt-5.4-mini',
       reasoning: 'high',
       speed: 'fast',
-      threadId: 'test-thread-a',
+      threadId: 'safe2',
       updatedAt: '2026-06-18T00:00:00.000Z',
       modelUpdatedAt: '2026-06-18T00:00:01.000Z',
       reasoningUpdatedAt: '2026-06-18T00:00:02.000Z',
@@ -103,7 +103,7 @@ test('normalizes persisted Codex control overrides', () => {
     model: 'gpt-5.4-mini',
     reasoning: 'high',
     speed: 'fast',
-    threadId: 'test-thread-a',
+    threadId: 'safe2',
     updatedAt: '2026-06-18T00:00:00.000Z',
     modelUpdatedAt: '2026-06-18T00:00:01.000Z',
     reasoningUpdatedAt: '2026-06-18T00:00:02.000Z',
@@ -133,7 +133,7 @@ test('normalizes persisted Codex control overrides', () => {
 test('legacy control timestamps migrate per field and max or ultra remain exact', () => {
   const legacy = normalizeState({
     controlOverrides: {
-      threadId: 'test-thread-a', model: 'gpt-5.6-sol', reasoning: 'max',
+      threadId: 'safe2', model: 'gpt-5.6-sol', reasoning: 'max',
       updatedAt: '2026-06-18T00:00:00.000Z',
     },
   });
@@ -143,7 +143,7 @@ test('legacy control timestamps migrate per field and max or ultra remain exact'
   assert.equal(legacy.controlOverrides.reasoning, 'max');
 
   const ultra = normalizeState({ controlOverrides: {
-    threadId: 'test-thread-a', reasoning: 'ultra', updatedAt: '2026-06-18T00:00:00.000Z',
+    threadId: 'safe2', reasoning: 'ultra', updatedAt: '2026-06-18T00:00:00.000Z',
   } });
   assert.equal(ultra.controlOverrides.reasoning, 'ultra');
 });

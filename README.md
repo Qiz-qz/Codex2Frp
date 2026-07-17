@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.5`.
+Current version: `v1.4.9`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.5 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the backend capability line for the current ChatGPT/Codex Desktop while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -28,7 +28,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.5/              Latest public installer release
+release/v1.4.9/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -37,25 +37,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.5/Codex2FrpSetup-v1.4.5.exe
+release/v1.4.9/Codex2FrpSetup-v1.4.9.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.5/SHA256SUMS.txt
+release/v1.4.9/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.5/SHA256SUMS.txt
+release/v1.4.9/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.5.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.9.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -170,7 +170,7 @@ node --check server.js
 npm run windows:installer
 ```
 
-The current side-effect-free public backend suite contains 709 tests. Coverage includes live model canonicalization, per-field confirmation leases, renderer approval lifecycle and duplicate-response handling, queued first-turn dispatch, protected-task-safe discovery, desktop bootstrap-context filtering, strict process-id filters, and CDP-bound window discovery.
+The current side-effect-free public backend suite covers live model canonicalization, per-field confirmation leases, renderer approval lifecycle and duplicate-response handling, queued first-turn dispatch, protected-task-safe discovery, desktop bootstrap-context filtering, strict process-id filters, CDP-bound window discovery, compact passive polling, and paged process details.
 
 The installer build writes:
 
@@ -197,6 +197,13 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.9
+
+- Adds bounded, cursor-paged process details for command, edit, and image activity so completed work can be expanded without loading an entire long task at once.
+- Adds compact passive status and selection-only task polling, reducing realtime payload and projection work without dropping phone-visible Codex messages.
+- Preserves stable task settings through transient desktop read gaps while keeping desktop changes authoritative.
+- Keeps nested attachment and image envelopes in desktop source order and exposes only bounded, opaque attachment capabilities.
 
 ### v1.4.4
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.9] - 2026-07-18
+
+This public backend snapshot targets the current ChatGPT/Codex Desktop capability line while preserving the repository's independent `v1.x` version history.
+
+- Adds bounded, cursor-based pagination for command, edit, and image process details, including completed-task image capabilities.
+- Adds compact passive status responses and selection-only thread polling to keep realtime synchronization responsive on long, actively updating tasks.
+- Keeps the latest desktop-visible transient status stable until ChatGPT replaces or clears it, while consecutive activity grouping still breaks at intervening thought or commentary.
+- Preserves model, reasoning, and Standard/Fast speed settings across transient read gaps without overriding later desktop changes.
+- Coalesces nested attachment and image envelopes in desktop source order and keeps public capability URLs opaque.
+- Expands the side-effect-free backend contracts for process-detail caching, cursor pagination, compact polling, settings reconciliation, approvals, and protected task control.
+
+## [1.4.7] - 2026-07-18
+
+This public backend snapshot targets the current ChatGPT/Codex Desktop capability line while preserving the repository's independent `v1.x` version history.
+
+- Long threads open from a compact 12-row cursor page and load older history on demand, avoiding a misleading retry state during normal large-history reads.
+- Nested or indented ChatGPT file/image envelopes now coalesce with their desktop presentation in original source order, so an attachment-rich user message is not duplicated or reordered.
+- Model, reasoning, and Standard/Fast speed state retains a same-thread, observed session fallback across transient CDP gaps, then refreshes when the desktop session changes; no global config or other thread is used as a substitute.
+- Keeps output image capabilities bounded and opaque, including images in completed process details.
+- The side-effect-free public backend suite passes 731 tests.
+
 ## [1.4.5] - 2026-07-17
 
 This public snapshot corresponds to the internal Codex2Frp 2.4.5 capability line while preserving the public repository's independent version history.

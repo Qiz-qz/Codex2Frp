@@ -67,7 +67,7 @@ test('only the composer plus-menu GET is classified as a read-only UI transactio
     transactionSource.indexOf('class ExplicitProcessControlTransaction'),
   );
   assert.match(contextBody, /pathname === '\/codex\/composer-plus-menu'[\s\S]*access\s*=\s*'readOnly'/);
-  assert.match(contextBody, /\r?\n\s*access,\r?\n/);
+  assert.match(contextBody, /\n\s*access,\n/);
   assert.match(transactionBody, /context\.access === 'readOnly'/);
   assert.match(transactionBody, /if \(!readOnly\)[\s\S]*readyGuardContext/);
   assert.doesNotMatch(contextBody, /composer-action[^}]+access\s*=\s*'readOnly'/s);

@@ -70,3 +70,31 @@ test('legacy image tags are anchored, strip complete blocks, and malformed block
   const prose = 'say <image name=[Image #1] path="C:\\secret\\one.png"> aloud';
   assert.equal(parseUserMessageEnvelope(prose).text, prose);
 });
+
+test('indented ChatGPT image trailers coalesce with the unindented desktop wrapper text', () => {
+  const request = '检查当前线程的图片加载状态。';
+  const unindented = parseUserMessageEnvelope(`${request}\n<image name=[Image #1] path="E:\\private\\one.png">\n</image>`);
+  const indented = parseUserMessageEnvelope(`${request}\n  <image name=[Image #1] path="E:\\private\\one.png">\n  </image>`);
+  assert.equal(indented.text, unindented.text);
+  assert.deepEqual(indented.attachmentNames, unindented.attachmentNames);
+  assert.equal(JSON.stringify(indented).includes('E:\\private'), false);
+});
+
+test('nested desktop file envelopes unwrap to the same visible request once', () => {
+  const inner = [
+    '# Files mentioned by the user:',
+    '## first.png: E:\\private\\first.png',
+    '## My request for Codex:',
+    '检查长线程顺序。',
+  ].join('\n');
+  const outer = [
+    '# Files mentioned by the user:',
+    '## second.png: E:\\private\\second.png',
+    '## My request for Codex:',
+    inner,
+  ].join('\n');
+  const parsed = parseUserMessageEnvelope(outer);
+  assert.equal(parsed.text, '检查长线程顺序。');
+  assert.deepEqual(parsed.attachmentNames, ['second.png', 'first.png']);
+  assert.equal(parsed.malformed, false);
+});

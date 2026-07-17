@@ -515,6 +515,33 @@ test('paired user records keep one public event and merge safe attachments', () 
   assert.equal(JSON.stringify(userEvents).includes('base64'), false);
 });
 
+test('nested file envelope pairs with the desktop user_message and keeps one process owner', () => {
+  const turnId = 'turn-nested-user-envelope';
+  const inner = '# Files mentioned by the user:\n## inner.png: C:/private/inner.png\n## My request for Codex:\n检查长线程';
+  const outer = `# Files mentioned by the user:\n## outer.png: C:/private/outer.png\n## My request for Codex:\n${inner}`;
+  const reconciler = new EventReconciler({ serverInstanceId: 'server-nested-user-envelope' });
+  reconciler.rehydrate([
+    fileEntry({ ...turnItem('task_started', turnId, '2026-07-17T15:10:33.000Z'), _stableOrder: 1 }, 0),
+    fileEntry({
+      type: 'response_item', timestamp: '2026-07-17T15:10:33.260Z', _stableOrder: 2,
+      payload: {
+        type: 'message', role: 'user', content: [{ type: 'input_text', text: outer }],
+        internal_chat_message_metadata_passthrough: { turn_id: turnId },
+      },
+    }, 100),
+    fileEntry({
+      type: 'event_msg', timestamp: '2026-07-17T15:10:33.262Z', _stableOrder: 3,
+      payload: { type: 'user_message', message: '检查长线程', local_images: ['C:/private/inner.png'] },
+    }, 200),
+  ]);
+
+  const users = reconciler.snapshot().events.filter(event => event.role === 'user');
+  assert.equal(users.length, 1);
+  assert.equal(users[0].text, '检查长线程');
+  assert.equal(users[0].turnId, turnId);
+  assert.deepEqual(users[0].attachments.map(item => item.name), ['outer.png', 'inner.png']);
+});
+
 test('visible reasoning boundary keeps same-text user actions distinct across delta snapshot and restart', () => {
   const turnId = 'turn-user-boundary';
   const entries = [

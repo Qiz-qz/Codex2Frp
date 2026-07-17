@@ -26,12 +26,12 @@ test('0.144.2 session projection preserves adjacency without claiming desktop vi
     /(?:rawOutput|arguments|privatePath|token|authorization)/i);
 });
 
-test('0.144.2 sanitized visual reference pins command and image captions without invented details', () => {
+test('0.144.2 direct visual evidence pins real command and image captions without invented details', () => {
   const capture = fixture('0.144.2-visible-timeline.json');
-  assert.equal(capture.visualPresentation.sources
-    .every(source => source.evidence === 'sanitized-reference'), true);
-  assert.equal(capture.visualPresentation.sources
-    .every(source => source.sha256 === undefined), true);
+  assert.deepEqual(capture.visualPresentation.sources.map(source => source.sha256), [
+    'a08f84a2ffea7fc08e3ca1a55d856375bb5a1796bfc66675aace2c27565222cc',
+    '4836a08bbec1e667c9a812a98b081e5c7013bcc67e9c88f2634aa3465041c4e1',
+  ]);
   assert.deepEqual(capture.visualPresentation.groups.map(group => [group.kind, group.count, group.title]), [
     ['command', 3, '运行了 3 个命令'],
     ['image', 4, '已查看 4 张图像'],

@@ -99,6 +99,11 @@ const {
   normalizeHistoryPageRequest,
   pageHistorySuffix,
 } = require('./lib/history/history-pagination');
+const {
+  pageProcessDetailActivities,
+  processDetailRevision,
+} = require('./lib/history/process-detail-pagination');
+const { createHistoryProcessDetailCache } = require('./lib/history/process-detail-cache');
 const { EventReconciler } = require('./lib/events/reconciler');
 const { TurnDiffStore } = require('./lib/events/turn-diff-store');
 const { buildTurnViews } = require('./lib/events/turn-view-builder');
@@ -173,6 +178,10 @@ const CODEX_RUNTIME_STALE_MS = 2 * 60 * 60 * 1000;
 const CODEX_HISTORY_TAIL_BYTES = 128 * 1024 * 1024;
 const CODEX_TITLE_SCAN_BYTES = 12 * 1024 * 1024;
 const MAX_HISTORY_MESSAGES = 120;
+// A first history response must become interactive before an entire long
+// session is projected.  Clients page older rows with the opaque cursor; this
+// value is deliberately small enough for the mobile cold-open path.
+const INITIAL_HISTORY_PAGE_SIZE = 12;
 const GUI_FAILURE_REPORT_LIMIT = 80;
 const GUI_FAILURE_LOG_SCAN_BYTES = 2 * 1024 * 1024;
 const GUI_FAILURE_LOG_RECENT_MS = 15 * 60 * 1000;
@@ -228,6 +237,16 @@ const firstUserMessageCache = new Map();
 const runtimeSummaryCache = new Map();
 const codexThreadListCache = new Map();
 const threadHistoryCache = new Map();
+// Detail payloads are retained only for process cards that the phone has
+// already received in summary form. This prevents a tap from reparsing a
+// massive session JSONL on the HTTP event loop.
+const historyProcessDetailCache = createHistoryProcessDetailCache({ limit: 96 });
+// Composer DOM reads are intentionally fail-closed when the requested mobile
+// thread is not the foreground desktop thread.  Keep a tiny, file-signature
+// keyed cache for the last settings actually recorded by that requested
+// thread, so a temporary DOM mismatch cannot turn an already-known setting
+// into an empty value on every phone poll.
+const threadSettingsFallbackCache = new Map();
 let codexCurrentThreadCache = { at: 0, selection: null };
 let foregroundNoticeThreadSnapshot = [];
 let foregroundNoticeSnapshotReady = false;
@@ -1821,6 +1840,7 @@ function listCodexThreads(limit = 500, options = {}) {
 async function handleThreads(req, res) {
   if (!isAuthorized(req)) return json(res, 401, { ok: false, code: 'UNAUTHORIZED', message: '访问令牌不正确。' });
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const selectionOnly = url.searchParams.get('selectionOnly') === '1';
   const forceRefresh = url.searchParams.get('refresh') === '1';
   if (forceRefresh) invalidateCodexThreadListCache();
   const limit = normalizeThreadListLimit(url.searchParams.get('limit'));
@@ -1828,7 +1848,12 @@ async function handleThreads(req, res) {
   const sync = await consumeDesktopSelectionForSync(desktopSelectionAdapter);
   const currentThread = sync.selection;
   const selectedThreadId = currentThread && currentThread.threadId ? currentThread.threadId : '';
-  const threads = listCodexThreads(limit, { includeSubagents, includeThreadId: selectedThreadId });
+  // The mobile live loop only needs to know whether the visible desktop task
+  // changed. Avoid scanning and serializing the full task directory every
+  // second; explicit drawer refreshes continue to use the complete response.
+  const threads = selectionOnly
+    ? []
+    : listCodexThreads(limit, { includeSubagents, includeThreadId: selectedThreadId });
   return json(res, 200, {
     ok: true,
     desktopSelectionSuppressed: sync.suppressed,
@@ -2481,7 +2506,7 @@ function parseCodexThreadHistory(threadId, request = {}) {
     fileKey: cursor.fileKey,
     boundaryHash: cursor.boundaryHash,
   }) : '';
-  return boundedSet(threadHistoryCache, cacheKey, {
+  const history = {
     ok: true,
     available: true,
     threadId,
@@ -2492,7 +2517,12 @@ function parseCodexThreadHistory(threadId, request = {}) {
     hasMore,
     nextBefore: Math.max(messagePage.nextBefore, turnPage.nextBefore),
     nextCursor,
-  }, 80);
+  };
+  Object.defineProperty(history, '_historyFileSignature', {
+    value: fileCacheSignature(fileStat),
+    enumerable: false,
+  });
+  return boundedSet(threadHistoryCache, cacheKey, history, 80);
 }
 
 function requestBaseUrl(req) {
@@ -2770,8 +2800,50 @@ function enrichHistoryMessage(message, req) {
   return next;
 }
 
-function enrichHistoryTurn(turn, req) {
-  const next = { ...turn };
+function isTerminalHistoryProcess(process = {}) {
+  return ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(process.state || '').toLowerCase());
+}
+
+function summarizeCompletedHistoryProcess(process = {}) {
+  const { detailActivities, ...summary } = process;
+  const detailCount = Number.isFinite(Number(process.detailCount))
+    ? Math.max(0, Math.floor(Number(process.detailCount)))
+    : Array.isArray(detailActivities) ? detailActivities.length : 0;
+  return {
+    ...summary,
+    detailCount,
+    detailAvailable: detailCount > 0,
+    detailRevision: processDetailRevision({ ...process, detailActivities }),
+  };
+}
+
+function summarizeCompletedHistoryTurn(turn = {}) {
+  const next = { ...turn, process: summarizeCompletedHistoryProcess(turn.process || {}) };
+  // A terminal turn's visible user/final cards are already carried by `user`
+  // and `final`.  `timeline` and `segments` duplicate the full activity stream
+  // (often several times over), so mobile summary history intentionally keeps
+  // only the compact process card.  Details are fetched on demand below.
+  delete next.timeline;
+  delete next.segments;
+  return next;
+}
+
+function cacheHistoryProcessDetails(history = {}) {
+  const threadId = String(history.threadId || '').trim();
+  const fileSignature = String(history._historyFileSignature || '').trim();
+  if (!threadId || !fileSignature || !Array.isArray(history.turns)) return;
+  for (const turn of history.turns) {
+    const process = turn && turn.process;
+    const presentationId = safeHistoryPresentationId(turn && turn.presentationId);
+    if (!process || !presentationId || !isTerminalHistoryProcess(process)) continue;
+    const revision = processDetailRevision(process);
+    historyProcessDetailCache.set({ threadId, fileSignature, presentationId, revision, process });
+  }
+}
+
+function enrichHistoryTurn(turn, req, options = {}) {
+  const summaryMode = options.detail === 'summary' && isTerminalHistoryProcess(turn && turn.process);
+  const next = summaryMode ? summarizeCompletedHistoryTurn(turn) : { ...turn };
   if (next.user) next.user = enrichHistoryMessage(next.user, req);
   if (next.final) next.final = enrichHistoryMessage(next.final, req);
   if (next.process) {
@@ -2808,14 +2880,15 @@ function enrichHistoryTurn(turn, req) {
   return next;
 }
 
-function enrichHistoryAttachments(history, req) {
+function enrichHistoryAttachments(history, req, options = {}) {
   if (!history || typeof history !== 'object') return history;
+  if (options.detail === 'summary') cacheHistoryProcessDetails(history);
   const next = { ...history };
   if (Array.isArray(next.messages)) {
     next.messages = next.messages.map(message => enrichHistoryMessage(message, req));
   }
   if (Array.isArray(next.turns)) {
-    next.turns = next.turns.map(turn => enrichHistoryTurn(turn, req));
+    next.turns = next.turns.map(turn => enrichHistoryTurn(turn, req, options));
   }
   return next;
 }
@@ -2831,11 +2904,12 @@ function handleThreadHistory(req, res) {
       return json(res, 400, { ok: false, code: 'BAD_THREAD_ID', message: '线程 ID 不正确。' });
     }
     if (url.searchParams.get('refresh') === '1' || url.searchParams.has('since')) invalidateCodexThreadListCache();
+    const detail = url.searchParams.get('detail') === 'summary' ? 'summary' : 'full';
     return json(res, 200, enrichHistoryAttachments(parseCodexThreadHistory(threadId, {
-      limit: url.searchParams.get('limit') || MAX_HISTORY_MESSAGES,
+      limit: url.searchParams.get('limit') || INITIAL_HISTORY_PAGE_SIZE,
       before: url.searchParams.get('before') || 0,
       cursor: url.searchParams.get('cursor') || '',
-    }), req));
+    }), req, { detail }));
   } catch (error) {
     if (error && error.code === 'HISTORY_CURSOR_STALE') {
       return json(res, 409, { ok: false, code: error.code, message: error.message });
@@ -3353,6 +3427,104 @@ function currentThreadSettingsFromItems(items) {
   };
 }
 
+function annotateObservedControlValue(value, source = '', confidence = 'observed', observedAt = '') {
+  if (!value || value.available !== true) return value || null;
+  return {
+    ...value,
+    source: String(value.source || source || ''),
+    observationSource: source || String(value.source || ''),
+    confidence,
+    observedAt: String(value.updatedAt || observedAt || ''),
+  };
+}
+
+function sessionTurnSettingsFromItems(items) {
+  const model = currentModelFromItems(items);
+  const reasoningMode = currentReasoningModeFromItems(items);
+  const speed = currentSpeedModeFromItems(items);
+  const observedAt = [model.updatedAt, reasoningMode.updatedAt, speed.updatedAt]
+    .filter(Boolean)
+    .sort()
+    .pop() || '';
+  return {
+    available: Boolean(model.available || reasoningMode.available || speed.available),
+    source: 'session-turn-context',
+    confidence: 'observed',
+    observedAt,
+    model,
+    reasoningMode,
+    speed,
+  };
+}
+
+function currentControlValueFromObservations(nextTurnSettings = {}, threadSettings = {}, turnSettings = {}, field = '') {
+  const exact = nextTurnSettings && nextTurnSettings.available === true ? nextTurnSettings[field] : null;
+  if (exact && exact.available === true) {
+    return annotateObservedControlValue(
+      exact,
+      String(nextTurnSettings.source || 'codex-desktop-composer-dom'),
+      String(nextTurnSettings.confidence || 'exact'),
+      String(nextTurnSettings.observedAt || ''),
+    );
+  }
+  const threadObserved = threadSettings && threadSettings[field];
+  if (threadObserved && threadObserved.available === true) {
+    return annotateObservedControlValue(
+      threadObserved,
+      String(threadSettings.source || 'session-thread-settings-applied'),
+      String(threadSettings.confidence || 'observed'),
+      String(threadSettings.observedAt || ''),
+    );
+  }
+  const turnObserved = turnSettings && turnSettings[field];
+  if (turnObserved && turnObserved.available === true) {
+    return annotateObservedControlValue(
+      turnObserved,
+      String(turnSettings.source || 'session-turn-context'),
+      String(turnSettings.confidence || 'observed'),
+      String(turnSettings.observedAt || ''),
+    );
+  }
+  return null;
+}
+
+function persistedThreadSettingsFallback(threadId = '') {
+  if (!isCodexThreadId(threadId)) {
+    return {
+      available: false,
+      source: 'session-turn-context',
+      confidence: 'unavailable',
+      reason: 'THREAD_SETTINGS_NOT_OBSERVED',
+    };
+  }
+  const file = findCodexSessionFileByThreadId(threadId);
+  if (!file) {
+    return {
+      available: false,
+      source: 'session-turn-context',
+      confidence: 'unavailable',
+      reason: 'THREAD_SETTINGS_NOT_OBSERVED',
+    };
+  }
+  let stat;
+  try { stat = fs.statSync(file); } catch { stat = null; }
+  const key = stat ? `${threadId}:${fileCacheSignature(stat)}` : '';
+  if (key && threadSettingsFallbackCache.has(key)) return threadSettingsFallbackCache.get(key);
+  const items = stat ? readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES) : [];
+  const threadSettings = currentThreadSettingsFromItems(items);
+  const turnSettings = sessionTurnSettingsFromItems(items);
+  const result = {
+    available: Boolean(threadSettings.available || turnSettings.available),
+    source: threadSettings.available ? threadSettings.source : turnSettings.source,
+    confidence: threadSettings.available ? threadSettings.confidence : turnSettings.confidence,
+    observedAt: threadSettings.observedAt || turnSettings.observedAt || '',
+    model: currentControlValueFromObservations({}, threadSettings, turnSettings, 'model'),
+    reasoningMode: currentControlValueFromObservations({}, threadSettings, turnSettings, 'reasoningMode'),
+    speed: currentControlValueFromObservations({}, threadSettings, turnSettings, 'speed'),
+  };
+  return key ? boundedSet(threadSettingsFallbackCache, key, result, 80) : result;
+}
+
 function compactProcessText(steps) {
   const thinking = [];
   let commandCount = 0;
@@ -3638,32 +3810,31 @@ function parseCodexStatus(options = {}) {
         desktopObservationReason: requestedNextTurnSettings.reason || '',
       }
       : requestedNextTurnSettings;
-  const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
-    ? nextTurnSettings.model
-    : modelInfoFromId('');
-  const currentReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
-    ? nextTurnSettings.reasoningMode
-    : reasoningModeFromValue('');
-  const currentSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
-    ? nextTurnSettings.speed
-    : speedModeFromValue('');
-  const lastObservedAt = [parsedModel.updatedAt, parsedReasoningMode.updatedAt, parsedSpeedMode.updatedAt]
-    .filter(Boolean)
-    .sort()
-    .pop() || '';
-  const lastTurnSettings = {
-    available: Boolean(parsedModel.available || parsedReasoningMode.available || parsedSpeedMode.available),
-    source: 'session-turn-context',
-    confidence: 'observed',
-    observedAt: lastObservedAt,
-    model: parsedModel,
-    reasoningMode: parsedReasoningMode,
-    speed: parsedSpeedMode,
-  };
-  // A transiently unavailable composer DOM must not erase capabilities that are
-  // already known from the active thread's observed model.  Keep confirmation
-  // strict (currentModel remains unavailable), but still expose the real model's
-  // reasoning and service-tier choices to the client.
+  const lastTurnSettings = sessionTurnSettingsFromItems(rawItems);
+  // `nextTurnSettings` remains the strict, exact closed-composer observation.
+  // The separately exposed current* fields are allowed to fall back only to a
+  // settings event or turn context from the same requested thread.  That gives
+  // the app a durable, truthfully-provenanced value while CDP is unavailable or
+  // the user is viewing a different desktop thread; it never guesses from the
+  // global config or another thread.
+  const currentModel = currentControlValueFromObservations(
+    requestedNextTurnSettings,
+    observedThreadSettings,
+    lastTurnSettings,
+    'model',
+  ) || modelInfoFromId('');
+  const currentReasoning = currentControlValueFromObservations(
+    requestedNextTurnSettings,
+    observedThreadSettings,
+    lastTurnSettings,
+    'reasoningMode',
+  ) || reasoningModeFromValue('');
+  const currentSpeed = currentControlValueFromObservations(
+    requestedNextTurnSettings,
+    observedThreadSettings,
+    lastTurnSettings,
+    'speed',
+  ) || speedModeFromValue('');
   const optionModel = currentModel.available === true ? currentModel : parsedModel;
   const speedSupported = optionModel.available === true && codexModelSupportsSpeed(optionModel);
   const modelOptions = modelOptionsForClient(liveModeOptions);
@@ -3762,6 +3933,21 @@ async function handleCodexStatus(req, res) {
     status.reasoningOptions = reasoningOptionsForCurrentModel(optionModel, liveModeOptions);
     status.speedSupported = optionModel?.available === true && codexModelSupportsSpeed(optionModel);
     status.speedOptions = resolveLiveSpeedOptions(status.speedSupported, status.currentSpeed, liveModeOptions);
+    if (url.searchParams.get('compact') === '1') {
+      // High-frequency passive polling only needs lifecycle and the observed
+      // composer values. The event feed owns live prose/process rows, while
+      // full status remains available for sends and explicit refreshes.
+      delete status.steps;
+      delete status.processText;
+      delete status.preview;
+      delete status.final;
+      delete status.error;
+      delete status.modelOptions;
+      delete status.reasoningOptions;
+      delete status.speedOptions;
+      delete status.attachments;
+      delete status.foregroundNotice;
+    }
     return json(res, 200, status);
   } catch (error) {
     return json(res, 500, { ok: false, code: 'CODEX_STATUS_FAILED', message: '读取 Codex 回复状态失败。', detail: String(error && error.message || error) });
@@ -4456,6 +4642,105 @@ async function evaluateCodexDesktopInternalRpc(expression, options = {}) {
     return await cdpEvaluate(client, expression);
   } finally {
     client.close();
+  }
+}
+
+function safeHistoryPresentationId(value = '') {
+  const id = String(value || '').trim();
+  // Presentation ids originate in the desktop protocol (client ids or the
+  // deterministic turn fallback).  Keep them URL-safe and bounded before
+  // using one as a lookup key; they are never interpreted as filesystem data.
+  return /^[A-Za-z0-9._:-]{1,256}$/.test(id) ? id : '';
+}
+
+function historyProcessDetailRoute(pathname = '') {
+  const match = String(pathname || '').match(/^\/codex\/v3\/threads\/([^/]+)\/presentations\/([^/]+)\/process$/);
+  if (!match) return null;
+  try {
+    const threadId = decodeURIComponent(match[1]);
+    const presentationId = safeHistoryPresentationId(decodeURIComponent(match[2]));
+    return isCodexThreadId(threadId) && presentationId ? { threadId, presentationId } : null;
+  } catch {
+    return null;
+  }
+}
+
+function enrichHistoryProcessDetail(process, req, page) {
+  const detailActivities = (Array.isArray(page.items) ? page.items : []).map(activity => ({
+    ...activity,
+    ...(Array.isArray(activity.attachments)
+      ? { attachments: enrichAttachmentList(activity.attachments, req, { inlineData: false }) }
+      : {}),
+  }));
+  return {
+    ...process,
+    detailActivities,
+    detailCount: page.detailCount,
+    detailAvailable: page.detailCount > 0,
+    detailRevision: page.revision,
+  };
+}
+
+function cachedHistoryProcessDetail(threadId = '', presentationId = '', revision = '') {
+  const file = findCodexSessionFileByThreadId(threadId);
+  if (!file) return null;
+  let stat;
+  try { stat = fs.statSync(file); } catch { return null; }
+  return historyProcessDetailCache.get({
+    threadId,
+    fileSignature: fileCacheSignature(stat),
+    presentationId,
+    revision,
+  });
+}
+
+function handleHistoryProcessDetail(req, res, route) {
+  if (!isAuthorized(req)) {
+    return json(res, 401, { ok: false, code: 'UNAUTHORIZED', message: '访问令牌不正确。' });
+  }
+  if (!route) {
+    return json(res, 400, { ok: false, code: 'BAD_HISTORY_PROCESS_ROUTE', message: '过程详情定位不正确。' });
+  }
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const revision = String(url.searchParams.get('revision') || '').trim();
+    if (!/^[a-f0-9]{64}$/i.test(revision)) {
+      return json(res, 400, {
+        ok: false,
+        code: 'HISTORY_PROCESS_REVISION_REQUIRED',
+        message: '请先刷新该任务摘要后再读取过程详情。',
+      });
+    }
+    const cached = cachedHistoryProcessDetail(route.threadId, route.presentationId, revision);
+    if (!cached || !cached.process) {
+      return json(res, 409, {
+        ok: false,
+        code: 'HISTORY_PROCESS_DETAIL_CACHE_MISS',
+        message: '该任务过程摘要已过期，请刷新当前历史后重试。',
+      });
+    }
+    const page = pageProcessDetailActivities(cached.process, {
+      limit: url.searchParams.get('limit') || '',
+      before: url.searchParams.get('before') || 0,
+      cursor: url.searchParams.get('cursor') || '',
+      revision,
+    });
+    return json(res, 200, {
+      ok: true,
+      available: true,
+      threadId: route.threadId,
+      presentationId: route.presentationId,
+      revision: page.revision,
+      hasMore: page.hasMore,
+      nextBefore: page.nextBefore,
+      nextCursor: page.nextCursor,
+      process: enrichHistoryProcessDetail(cached.process, req, page),
+    });
+  } catch (error) {
+    if (error && error.code === 'PROCESS_DETAIL_CURSOR_STALE') {
+      return json(res, 409, { ok: false, code: error.code, message: error.message });
+    }
+    return json(res, 500, { ok: false, code: 'CODEX_HISTORY_PROCESS_FAILED', message: '读取任务过程详情失败。', detail: String(error && error.message || error) });
   }
 }
 
@@ -8532,18 +8817,22 @@ async function handleClientConfig(req, res) {
   const configSpeed = speedModeFromValue(tomlStringValue(configText, 'service_tier'));
   const requestedThreadId = url.searchParams.get('thread') || '';
   const nextTurnSettings = await readLiveCodexComposerModeState({ threadId: requestedThreadId });
+  const persistedSettings = persistedThreadSettingsFallback(requestedThreadId);
   const liveModeOptions = cachedLiveModeOptions();
   const controlOverrides = readAppState().controlOverrides || {};
   const matchingControlOverrides = matchingOverridesForThread(controlOverrides, requestedThreadId);
   const confirmedModel = controlOverrideModel(matchingControlOverrides, {}, liveModeOptions);
   const confirmedReasoning = controlOverrideReasoning(matchingControlOverrides, {}, liveModeOptions, confirmedModel);
   const confirmedSpeed = controlOverrideSpeed(matchingControlOverrides, {});
-  const observedModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
-    ? nextTurnSettings.model : null;
-  const observedReasoning = nextTurnSettings.available === true && nextTurnSettings.reasoningMode?.available === true
-    ? nextTurnSettings.reasoningMode : null;
-  const observedSpeed = nextTurnSettings.available === true && nextTurnSettings.speed?.available === true
-    ? nextTurnSettings.speed : null;
+  const observedModel = currentControlValueFromObservations(
+    nextTurnSettings, persistedSettings, {}, 'model',
+  );
+  const observedReasoning = currentControlValueFromObservations(
+    nextTurnSettings, persistedSettings, {}, 'reasoningMode',
+  );
+  const observedSpeed = currentControlValueFromObservations(
+    nextTurnSettings, persistedSettings, {}, 'speed',
+  );
   const currentModel = preferConfirmedControlValue(
     confirmedModel, observedModel, {
       observedAt: nextTurnSettings.observedAt,
@@ -8603,6 +8892,7 @@ async function handleClientConfig(req, res) {
     currentReasoning,
     currentSpeed,
     nextTurnSettings,
+    persistedSettings,
     configuredDefaults: {
       source: 'codex-config',
       model: configModel,
@@ -9125,6 +9415,10 @@ function handleExplicitUiRequest(req, res, handler) {
 async function dispatchRequest(req, res) {
   const pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
   if (req.method === 'OPTIONS') return options(res);
+  const processDetailRoute = historyProcessDetailRoute(pathname);
+  if (req.method === 'GET' && /^\/codex\/v3\/threads\//.test(pathname) && /\/presentations\/[^/]+\/process$/.test(pathname)) {
+    return handleHistoryProcessDetail(req, res, processDetailRoute);
+  }
   if (req.url.startsWith('/codex/v3/') || req.url.startsWith('/codex/thread-input')) {
     return handleV3ApiRequest(req, res);
   }

@@ -7,7 +7,7 @@ const {
   createCdpBoundThreadNavigator,
 } = require('../lib/control/cdp-bound-thread-navigation');
 
-const THREAD = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const THREAD = '019f6596-e104-7d62-a0c7-e858f187c9f5';
 
 test('bound thread navigation reports an exact CDP selection without using a system deep link', async () => {
   const calls = [];

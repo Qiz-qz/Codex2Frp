@@ -12,7 +12,7 @@
       "exact_separate_window_ui_interaction_not_performed",
       "session_derived_fields_are_not_called_desktop_visible",
       "command_and_file_expansion_details_not_observed",
-      "visual_image_evidence_is_sanitized_reference_only"
+      "visual_image_evidence_is_from_user_screenshots_not_the_disposable_run"
     ]
   },
   "sessionProjection": {
@@ -39,21 +39,21 @@
     "sources": [
       {
         "id": "running-timeline-screenshot",
-        "evidence": "sanitized-reference",
+        "sha256": "a08f84a2ffea7fc08e3ca1a55d856375bb5a1796bfc66675aace2c27565222cc",
         "directlyObservedCaptions": ["运行了 3 个命令", "已查看 4 张图像"],
         "showsPublicCommentary": true,
         "showsReasoningSummary": true
       },
       {
         "id": "single-image-screenshot",
-        "evidence": "sanitized-reference",
+        "sha256": "4836a08bbec1e667c9a812a98b081e5c7013bcc67e9c88f2634aa3465041c4e1",
         "directlyObservedCaptions": ["已查看 1 张图像"]
       }
     ],
     "groups": [
-      { "id": "visual-command-3", "kind": "command", "count": 3, "state": "succeeded", "title": "运行了 3 个命令", "provenance": "sanitized-reference", "expansionObserved": false },
-      { "id": "visual-image-4", "kind": "image", "variant": "imageView", "count": 4, "state": "succeeded", "title": "已查看 4 张图像", "provenance": "sanitized-reference", "expansionObserved": false },
-      { "id": "visual-image-1", "kind": "image", "variant": "imageView", "count": 1, "state": "succeeded", "title": "已查看 1 张图像", "provenance": "sanitized-reference", "expansionObserved": false }
+      { "id": "visual-command-3", "kind": "command", "count": 3, "state": "succeeded", "title": "运行了 3 个命令", "provenance": "direct-user-screenshot", "expansionObserved": false },
+      { "id": "visual-image-4", "kind": "image", "variant": "imageView", "count": 4, "state": "succeeded", "title": "已查看 4 张图像", "provenance": "direct-user-screenshot", "expansionObserved": false },
+      { "id": "visual-image-1", "kind": "image", "variant": "imageView", "count": 1, "state": "succeeded", "title": "已查看 1 张图像", "provenance": "direct-user-screenshot", "expansionObserved": false }
     ]
   }
 }

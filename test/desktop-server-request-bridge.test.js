@@ -96,5 +96,3 @@ test('renderer reload expires the previous bridge epoch without answering stale 
     error => error && error.code === 'PENDING_REQUEST_EXPIRED',
   );
 });
-
-
