@@ -33,6 +33,7 @@ const modelOptionUtils = require('./lib/model-options');
 const { isAuthorizedRequest } = require('./lib/security/auth');
 const { selectCodexCdpTarget } = require('./lib/windows/cdp-target');
 const { createBoundCodexWindowDiscovery } = require('./lib/windows/cdp-bound-window-discovery');
+const { reconcileCdpProcessBinding } = require('./lib/windows/cdp-process-binding');
 const { resolveNextTurnSettings } = require('./lib/windows/composer-next-turn-settings');
 const { V3ApiRouter } = require('./lib/api/v3-router');
 const {
@@ -63,7 +64,7 @@ const {
   normalizeShowHomeResult,
   normalizeShowThreadResult,
 } = require('./lib/control/codex-app-action-navigation');
-const { classifyMenuItem, isExecutableMenuItem } = require('./lib/control/composer-menu-classifier');
+const { classifyMenuItem, isExecutableMenuItem, publishableMenuItems } = require('./lib/control/composer-menu-classifier');
 const {
   consumeDesktopSelectionForSync,
   createDesktopSelectionAdapter,
@@ -92,6 +93,12 @@ const {
   mergeAdjacentUserHistoryMessage: mergeHistoryUserPair,
   mergeUserHistoryAttachments,
 } = require('./lib/events/history-user-pair');
+const {
+  decodeHistoryCursor,
+  encodeHistoryCursor,
+  normalizeHistoryPageRequest,
+  pageHistorySuffix,
+} = require('./lib/history/history-pagination');
 const { EventReconciler } = require('./lib/events/reconciler');
 const { TurnDiffStore } = require('./lib/events/turn-diff-store');
 const { buildTurnViews } = require('./lib/events/turn-view-builder');
@@ -125,6 +132,7 @@ const STATE_DIR = process.env.CODEX2FRP_STATE_DIR || DEFAULT_STATE_DIR;
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const TURN_INPUT_QUEUE_FILE = path.join(STATE_DIR, 'turn-input-queue.json');
 const ATTACHMENT_STORE_DIR = path.join(STATE_DIR, 'attachments');
+const HISTORY_ATTACHMENT_CACHE_DIR = path.join(STATE_DIR, 'history-attachments');
 const PROTECTED_THREADS_FILE = path.join(STATE_DIR, 'protected-threads.json');
 let sakuraRouteCache = { at: 0, result: null };
 const inlineAttachmentCache = new Map();
@@ -153,9 +161,10 @@ function loadOrCreateMobileToken(file) {
 }
 
 const WINDOWS_LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
-const CODEX_SESSION_INDEX = path.join(os.homedir(), '.codex', 'session_index.jsonl');
-const CODEX_MODEL_CACHE_FILE = path.join(os.homedir(), '.codex', 'models_cache.json');
+const CODEX_HOME_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+const CODEX_SESSIONS_DIR = path.join(CODEX_HOME_DIR, 'sessions');
+const CODEX_SESSION_INDEX = path.join(CODEX_HOME_DIR, 'session_index.jsonl');
+const CODEX_MODEL_CACHE_FILE = path.join(CODEX_HOME_DIR, 'models_cache.json');
 const CODEX_DESKTOP_LOGS_DIR = process.env.CODEX_DESKTOP_LOGS_DIR || path.join(WINDOWS_LOCALAPPDATA, 'OpenAI', 'Codex', 'logs');
 const CODEX_SESSION_TAIL_BYTES = 5 * 1024 * 1024;
 const CODEX_ACTIVITY_TAIL_BYTES = 512 * 1024;
@@ -187,6 +196,7 @@ const CODEX_CDP_PREFERRED_PORT = Number(process.env.CODEX2FRP_CDP_PORT || 39252)
 const CODEX_CDP_PORT_SCAN_COUNT = Math.max(1, Number(process.env.CODEX2FRP_CDP_PORT_SCAN_COUNT || 12));
 const CODEX_CDP_HOST = process.env.CODEX2FRP_CDP_HOST || '127.0.0.1';
 const CODEX_CDP_SEND_TIMEOUT_MS = Number(process.env.CODEX2FRP_CDP_SEND_TIMEOUT_MS || 4500);
+const CODEX_PLUS_MENU_CDP_TIMEOUT_MS = Number(process.env.CODEX2FRP_PLUS_MENU_CDP_TIMEOUT_MS || 900);
 const CODEX_CDP_PASSIVE_PROBE_TIMEOUT_MS = Number(process.env.CODEX2FRP_CDP_PASSIVE_PROBE_TIMEOUT_MS || 250);
 const CODEX_CDP_PASSIVE_SEND_TIMEOUT_MS = Number(process.env.CODEX2FRP_CDP_PASSIVE_SEND_TIMEOUT_MS || 800);
 const CODEX_CDP_READY_TIMEOUT_SECONDS = Number(process.env.CODEX2FRP_CDP_READY_TIMEOUT_SECONDS || 45);
@@ -201,7 +211,7 @@ const REASONING_MODE_TARGETS = {
   low: { key: 'low', value: 'low', label: '低', displayName: '低' },
   medium: { key: 'medium', value: 'medium', label: '中', displayName: '中' },
   high: { key: 'high', value: 'high', label: '高', displayName: '高' },
-  xhigh: { key: 'xhigh', value: 'xhigh', label: '超高', displayName: '超高' },
+  xhigh: { key: 'xhigh', value: 'xhigh', label: '极高', displayName: '极高' },
   max: { key: 'max', value: 'max', label: '最大', displayName: '最大' },
   ultra: { key: 'ultra', value: 'ultra', label: '超强', displayName: '超强' },
 };
@@ -529,6 +539,7 @@ const v3Bridge = {
   runtime: desktopControlRuntime,
   router: v3ApiRouter,
 };
+const CODEX_PLUS_MENU_MAX_SCROLL_STEPS = 32;
 const explicitUiProtectedThreadGuard = createDynamicProtectedThreadGuard({
   registry: threadProtectionRegistry,
   allowedThreadIds: splitConfiguredIds(process.env.CODEX2FRP_ALLOWED_THREAD_IDS),
@@ -677,14 +688,14 @@ function cleanupKeepAwake() {
 
 function readCodexConfigText() {
   try {
-    return fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8');
+    return fs.readFileSync(path.join(CODEX_HOME_DIR, 'config.toml'), 'utf8');
   } catch {
     return '';
   }
 }
 
 function writeCodexConfigStringValue(key, value) {
-  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+  const configPath = path.join(CODEX_HOME_DIR, 'config.toml');
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const nextLine = `${key} = ${JSON.stringify(String(value || ''))}`;
   let text = readCodexConfigText();
@@ -718,7 +729,7 @@ function readModelCatalogOptions() {
   const configText = readCodexConfigText();
   const catalogPath = tomlStringValue(configText, 'model_catalog_json');
   const configuredPath = catalogPath.startsWith('~') ? path.join(os.homedir(), catalogPath.slice(1)) : catalogPath;
-  const resolvedPath = configuredPath || path.join(os.homedir(), '.codex', 'models_cache.json');
+  const resolvedPath = configuredPath || CODEX_MODEL_CACHE_FILE;
   const fallback = () => {
     const current = tomlStringValue(configText, 'model');
     return current ? [{ key: current, id: current, label: labelFromModelName(current), displayName: current, source: 'local' }] : [];
@@ -877,6 +888,10 @@ function controlOverrideSpeed(overrides = {}, parsed = {}) {
   if (!overrides.speed || !overrideIsFresh(overrides, parsed.updatedAt || '', { updatedAt })) return null;
   const mode = speedModeFromValue(overrides.speed, updatedAt);
   return mode && mode.available ? mode : null;
+}
+
+function firstAvailableControlValue(...values) {
+  return values.find(value => value && value.available === true) || null;
 }
 
 
@@ -1878,12 +1893,13 @@ function readTailLines(file) {
   }
 }
 
-function readTailLinesWithLimit(file, maxBytes) {
+function readTailLinesWithLimit(file, maxBytes, endOffset = undefined) {
   const stat = fs.statSync(file);
-  const start = Math.max(0, stat.size - maxBytes);
+  const end = Math.max(0, Math.min(stat.size, Number.isFinite(endOffset) ? Math.floor(endOffset) : stat.size));
+  const start = Math.max(0, end - maxBytes);
   const fd = fs.openSync(file, 'r');
   try {
-    const buffer = Buffer.alloc(stat.size - start);
+    const buffer = Buffer.alloc(end - start);
     fs.readSync(fd, buffer, 0, buffer.length, start);
     let text = buffer.toString('utf8');
     if (start > 0) {
@@ -1962,7 +1978,7 @@ function countCodexHistoryMessages(lines, maxNeeded = MAX_HISTORY_MESSAGES) {
   let count = 0;
   let currentTurn = null;
   let lastUserHistoryMessage = null;
-  const need = Math.max(1, Math.min(Number(maxNeeded) || MAX_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES));
+  const need = Math.max(1, Number(maxNeeded) || MAX_HISTORY_MESSAGES);
   for (const line of lines) {
     let item;
     try { item = JSON.parse(line); } catch { continue; }
@@ -2002,35 +2018,107 @@ function countCodexHistoryMessages(lines, maxNeeded = MAX_HISTORY_MESSAGES) {
   return count;
 }
 
-function readHistoryLinesAdaptive(file, desiredMessages = MAX_HISTORY_MESSAGES) {
+function readHistoryLinesAdaptive(file, desiredMessages = MAX_HISTORY_MESSAGES, endOffset = undefined) {
   const stat = fs.statSync(file);
-  const maxBytes = Math.min(stat.size, CODEX_HISTORY_TAIL_BYTES);
-  const desired = Math.max(1, Math.min(Number(desiredMessages) || MAX_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES));
+  const maxBytes = Math.max(0, Math.min(
+    stat.size,
+    Number.isFinite(endOffset) ? Math.floor(endOffset) : stat.size,
+  ));
+  const desired = Math.max(1, Number(desiredMessages) || MAX_HISTORY_MESSAGES);
 
   if (maxBytes <= CODEX_HISTORY_INITIAL_TAIL_BYTES * 6) {
-    return { lines: readTailLinesWithLimit(file, maxBytes), stat, scannedBytes: maxBytes };
+    return { lines: readTailLinesWithLimit(file, maxBytes, maxBytes), stat, scannedBytes: maxBytes, endOffset: maxBytes };
   }
 
   const initialBytes = Math.min(CODEX_HISTORY_INITIAL_TAIL_BYTES, maxBytes);
-  const initialLines = readTailLinesWithLimit(file, initialBytes);
+  const initialLines = readTailLinesWithLimit(file, initialBytes, maxBytes);
   if (countCodexHistoryMessages(initialLines, desired) >= desired) {
-    return { lines: initialLines, stat, scannedBytes: initialBytes };
+    return { lines: initialLines, stat, scannedBytes: initialBytes, endOffset: maxBytes };
   }
 
-  return { lines: readTailLinesWithLimit(file, maxBytes), stat, scannedBytes: maxBytes };
+  let candidateBytes = Math.min(CODEX_HISTORY_TAIL_BYTES, maxBytes);
+  let candidateLines = readTailLinesWithLimit(file, candidateBytes, maxBytes);
+  while (candidateBytes < maxBytes && countCodexHistoryMessages(candidateLines, desired) < desired) {
+    candidateBytes = Math.min(maxBytes, candidateBytes * 2);
+    candidateLines = readTailLinesWithLimit(file, candidateBytes, maxBytes);
+  }
+  return { lines: candidateLines, stat, scannedBytes: candidateBytes, endOffset: maxBytes };
 }
 
 function extractUserAttachments(payload) {
-  const paths = [];
+  const sources = [];
   for (const key of ['local_images', 'images']) {
     if (!Array.isArray(payload[key])) continue;
     for (const item of payload[key]) {
-      if (typeof item === 'string') paths.push(item);
-      else if (item && typeof item.path === 'string') paths.push(item.path);
-      else if (item && typeof item.filePath === 'string') paths.push(item.filePath);
+      if (typeof item === 'string') sources.push(item);
+      else if (item && typeof item.path === 'string') sources.push(item.path);
+      else if (item && typeof item.filePath === 'string') sources.push(item.filePath);
     }
   }
-  return paths;
+  if (Array.isArray(payload.content)) {
+    for (const item of payload.content) {
+      if (item && item.type === 'input_image' && typeof item.image_url === 'string') {
+        sources.push(item.image_url);
+      }
+    }
+  }
+  return sources.map(materializeHistoryImageSource).filter(Boolean);
+}
+
+function historyImageExtension(mimeType = '') {
+  const normalized = String(mimeType || '').toLowerCase();
+  if (normalized === 'image/jpeg') return 'jpg';
+  if (normalized === 'image/png') return 'png';
+  if (normalized === 'image/gif') return 'gif';
+  if (normalized === 'image/webp') return 'webp';
+  if (normalized === 'image/bmp') return 'bmp';
+  if (normalized === 'image/heic') return 'heic';
+  if (normalized === 'image/heif') return 'heif';
+  return '';
+}
+
+function materializeHistoryImageSource(value) {
+  if (value && typeof value === 'object') {
+    const inline = String(value.dataUrl || value.image_url || '');
+    if (inline) return materializeHistoryImageSource(inline);
+    return value;
+  }
+  const source = String(value || '').trim();
+  if (!/^data:image\//i.test(source)) return source;
+  try {
+    const saved = v3Bridge.attachmentStore.saveBatch([{
+      name: 'image',
+      dataUrl: source,
+      mimeType: (source.match(/^data:([^;,]+)/i) || [])[1] || '',
+    }])[0];
+    const extension = historyImageExtension(saved && saved.mimeType);
+    if (!saved || !extension) return '';
+    const opened = v3Bridge.attachmentStore.read(saved.id);
+    if (!opened || !opened.data || opened.data.length <= 0) return '';
+    fs.mkdirSync(HISTORY_ATTACHMENT_CACHE_DIR, { recursive: true });
+    const filePath = path.join(HISTORY_ATTACHMENT_CACHE_DIR, `${saved.id}.${extension}`);
+    try {
+      fs.writeFileSync(filePath, opened.data, { flag: 'wx' });
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+    }
+    return setPrivateAttachmentSource({
+      name: `image-${saved.id.slice(0, 8)}.${extension}`,
+      mime: saved.mimeType,
+      mimeType: saved.mimeType,
+      size: saved.sizeBytes,
+      filePath,
+    }, filePath);
+  } catch {
+    return '';
+  }
+}
+
+function projectUserHistoryAttachment(attachment) {
+  const materialized = materializeHistoryImageSource(attachment);
+  if (!materialized) return null;
+  if (typeof materialized === 'object') return materialized;
+  return { filePath: materialized, name: path.basename(materialized) || 'image' };
 }
 
 function extractUserHistoryMessage(item) {
@@ -2065,7 +2153,58 @@ function isDuplicateAdjacentUserHistoryMessage(previous, next, timestamp = '') {
   return mergeHistoryUserPair(previous, next, timestamp).duplicate;
 }
 
-function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
+function historyCursorFileKey(file) {
+  return crypto.createHash('sha256').update(path.resolve(file).toLowerCase(), 'utf8').digest('hex');
+}
+
+function historyCursorBoundaryHash(file, endOffset) {
+  const end = Math.max(0, Math.floor(Number(endOffset) || 0));
+  const start = Math.max(0, end - 4096);
+  const buffer = Buffer.alloc(end - start);
+  const fd = fs.openSync(file, 'r');
+  try {
+    if (buffer.length) fs.readSync(fd, buffer, 0, buffer.length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function staleHistoryCursor(message = '历史分页锚点已失效，请刷新后重试。') {
+  const error = new Error(message);
+  error.code = 'HISTORY_CURSOR_STALE';
+  return error;
+}
+
+function resolveHistoryCursor(file, fileStat, request, limit) {
+  const encoded = String(request?.cursor || '').trim();
+  if (!encoded) {
+    const endOffset = fileStat.size;
+    return {
+      endOffset,
+      messageBefore: Math.max(0, Number(request?.before) || 0),
+      turnBefore: Math.max(0, Number(request?.before) || 0),
+      fileKey: historyCursorFileKey(file),
+      boundaryHash: historyCursorBoundaryHash(file, endOffset),
+      limit,
+    };
+  }
+  let decoded;
+  try {
+    decoded = decodeHistoryCursor(encoded);
+  } catch {
+    throw staleHistoryCursor('历史分页锚点格式无效，请刷新后重试。');
+  }
+  if (decoded.endOffset > fileStat.size || decoded.fileKey !== historyCursorFileKey(file)) {
+    throw staleHistoryCursor();
+  }
+  if (decoded.boundaryHash !== historyCursorBoundaryHash(file, decoded.endOffset)) {
+    throw staleHistoryCursor();
+  }
+  return { ...decoded, limit };
+}
+
+function parseCodexThreadHistory(threadId, request = {}) {
   const file = findCodexSessionFileByThreadId(threadId);
   if (!file) {
     return {
@@ -2093,8 +2232,12 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     };
   }
 
-  const normalizedLimit = Math.max(1, Math.min(Number(limit) || MAX_HISTORY_MESSAGES, MAX_HISTORY_MESSAGES));
-  const cacheKey = `${threadId}:${file}:${fileCacheSignature(fileStat)}:${normalizedLimit}`;
+  const pageRequest = normalizeHistoryPageRequest(
+    typeof request === 'object' && request !== null ? request : { limit: request },
+  );
+  const cursor = resolveHistoryCursor(file, fileStat, request, pageRequest.limit);
+  const desiredMessages = Math.max(cursor.messageBefore, cursor.turnBefore) + pageRequest.limit + 1;
+  const cacheKey = `${threadId}:${file}:${fileCacheSignature(fileStat)}:${pageRequest.limit}:${request?.cursor || pageRequest.before}:${cursor.endOffset}`;
   if (threadHistoryCache.has(cacheKey)) return threadHistoryCache.get(cacheKey);
 
   const messages = [];
@@ -2207,7 +2350,7 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
     const duration = historyDurationText(startedAt, completedAt);
     return duration ? `Codex · 失败 ${duration}` : 'Codex';
   }
-  const historyTail = readHistoryLinesAdaptive(file, normalizedLimit);
+  const historyTail = readHistoryLinesAdaptive(file, desiredMessages, cursor.endOffset);
   for (const line of historyTail.lines) {
     let item;
     try { item = JSON.parse(line); } catch { continue; }
@@ -2245,7 +2388,7 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
       const merged = mergeHistoryUserPair(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '');
       const duplicate = isDuplicateAdjacentUserHistoryMessage(lastUserHistoryMessage, userHistoryMessage, item.timestamp || '');
       const { text, attachments } = merged.message;
-      const projectedAttachments = attachments.map(filePath => ({ filePath, name: path.basename(filePath) }));
+      const projectedAttachments = attachments.map(projectUserHistoryAttachment).filter(Boolean);
       if ((text || attachments.length) && !duplicate) {
         lastUserHistoryIndex = messages.length;
         messages.push({
@@ -2327,14 +2470,28 @@ function parseCodexThreadHistory(threadId, limit = MAX_HISTORY_MESSAGES) {
   const historyReconciler = new EventReconciler({ serverInstanceId: 'history-parser' });
   const normalizedEvents = historyReconciler.rehydrate(historyEntries).events;
 
+  const messagePage = pageHistorySuffix(messages, { limit: pageRequest.limit, before: cursor.messageBefore });
+  const allTurns = buildTurnViews(registerHistoryEventAttachments(normalizedEvents), threadId);
+  const turnPage = pageHistorySuffix(allTurns, { limit: pageRequest.limit, before: cursor.turnBefore });
+  const hasMore = messagePage.hasMore || turnPage.hasMore || historyTail.scannedBytes < cursor.endOffset;
+  const nextCursor = hasMore ? encodeHistoryCursor({
+    endOffset: cursor.endOffset,
+    messageBefore: messagePage.nextBefore,
+    turnBefore: turnPage.nextBefore,
+    fileKey: cursor.fileKey,
+    boundaryHash: cursor.boundaryHash,
+  }) : '';
   return boundedSet(threadHistoryCache, cacheKey, {
     ok: true,
     available: true,
     threadId,
     sessionFile: path.basename(file),
-    truncated: historyTail.stat.size > CODEX_HISTORY_TAIL_BYTES,
-    messages: messages.slice(-normalizedLimit),
-    turns: buildTurnViews(registerHistoryEventAttachments(normalizedEvents), threadId).slice(-normalizedLimit),
+    truncated: historyTail.scannedBytes < cursor.endOffset,
+    messages: messagePage.items,
+    turns: turnPage.items,
+    hasMore,
+    nextBefore: Math.max(messagePage.nextBefore, turnPage.nextBefore),
+    nextCursor,
   }, 80);
 }
 
@@ -2484,7 +2641,10 @@ function trustedLocalCapabilityUrl(value, req) {
 function registerHistoryEventAttachments(events) {
   return (Array.isArray(events) ? events : []).map(event => {
     if (!event || !Array.isArray(event.attachments) || event.attachments.length === 0) return event;
-    const attachments = event.attachments.map(attachment => {
+    const attachments = event.attachments.map(rawAttachment => {
+      const attachment = typeof materializeHistoryImageSource === 'function'
+        ? (materializeHistoryImageSource(rawAttachment) || rawAttachment)
+        : rawAttachment;
       const filePath = attachmentFilePath(attachment) || getPrivateAttachmentSource(attachment);
       const name = path.basename(String(attachment.name || filePath || 'image')) || 'image';
       const declaredSize = Number(attachment.size);
@@ -2593,7 +2753,11 @@ function enrichStatusAttachments(status, req) {
 function enrichHistoryMessage(message, req) {
   const next = { ...message };
   if (Array.isArray(next.attachments)) {
-    next.attachments = enrichAttachmentList(next.attachments, req, { inlineData: false });
+    // History images are user-visible message content.  Inline only the
+    // already validated, bounded images so the phone can cache them locally
+    // and open the full viewer without a second capability request.  Larger
+    // images continue to use the short-lived attachment capability URL.
+    next.attachments = enrichAttachmentList(next.attachments, req, { inlineData: true });
   }
   if (Array.isArray(next.processSteps)) {
     next.processSteps = next.processSteps.map(step => ({
@@ -2667,8 +2831,15 @@ function handleThreadHistory(req, res) {
       return json(res, 400, { ok: false, code: 'BAD_THREAD_ID', message: '线程 ID 不正确。' });
     }
     if (url.searchParams.get('refresh') === '1' || url.searchParams.has('since')) invalidateCodexThreadListCache();
-    return json(res, 200, enrichHistoryAttachments(parseCodexThreadHistory(threadId, url.searchParams.get('limit') || MAX_HISTORY_MESSAGES), req));
+    return json(res, 200, enrichHistoryAttachments(parseCodexThreadHistory(threadId, {
+      limit: url.searchParams.get('limit') || MAX_HISTORY_MESSAGES,
+      before: url.searchParams.get('before') || 0,
+      cursor: url.searchParams.get('cursor') || '',
+    }), req));
   } catch (error) {
+    if (error && error.code === 'HISTORY_CURSOR_STALE') {
+      return json(res, 409, { ok: false, code: error.code, message: error.message });
+    }
     return json(res, 500, { ok: false, code: 'CODEX_HISTORY_FAILED', message: '读取 Codex 聊天记录失败。', detail: String(error && error.message || error) });
   }
 }
@@ -3151,6 +3322,37 @@ function currentSpeedModeFromItems(items) {
   return speedModeFromValue(value, updatedAt);
 }
 
+function currentThreadSettingsFromItems(items) {
+  let latest = null;
+  for (const item of items) {
+    const payload = item && item.payload || {};
+    if (item?.type !== 'event_msg' || payload.type !== 'thread_settings_applied') continue;
+    const settings = payload.thread_settings && typeof payload.thread_settings === 'object'
+      ? payload.thread_settings
+      : {};
+    latest = { settings, observedAt: item.timestamp || '' };
+  }
+  if (!latest) return {
+    available: false,
+    source: 'session-thread-settings-applied',
+    confidence: 'unavailable',
+    reason: 'THREAD_SETTINGS_NOT_OBSERVED',
+  };
+  const { settings, observedAt } = latest;
+  const model = modelInfoFromId(settings.model || '', observedAt);
+  const reasoningMode = reasoningModeFromValue(settings.reasoning_effort || '', observedAt);
+  const speed = speedModeFromValue(settings.service_tier || '', observedAt);
+  return {
+    available: Boolean(model.available || reasoningMode.available || speed.available),
+    source: 'session-thread-settings-applied',
+    confidence: 'observed',
+    observedAt,
+    model,
+    reasoningMode,
+    speed,
+  };
+}
+
 function compactProcessText(steps) {
   const thinking = [];
   let commandCount = 0;
@@ -3419,12 +3621,23 @@ function parseCodexStatus(options = {}) {
   const parsedReasoningMode = currentReasoningModeFromItems(rawItems);
   const parsedSpeedMode = currentSpeedModeFromItems(rawItems);
   const liveModeOptions = options.liveModeOptions || null;
-  const nextTurnSettings = options.nextTurnSettings || options.liveModeState || {
+  const requestedNextTurnSettings = options.nextTurnSettings || options.liveModeState || {
     available: false,
     source: 'codex-desktop-composer-dom',
     confidence: 'unavailable',
     reason: 'DESKTOP_SELECTION_UNAVAILABLE',
   };
+  const observedThreadSettings = currentThreadSettingsFromItems(rawItems);
+  const nextTurnSettings = requestedNextTurnSettings.available === true
+    ? requestedNextTurnSettings
+    : observedThreadSettings.available === true
+      ? {
+        ...observedThreadSettings,
+        requestedThreadId: options.threadId || threadIdFromSessionFile(file),
+        exactThreadId: options.threadId || threadIdFromSessionFile(file),
+        desktopObservationReason: requestedNextTurnSettings.reason || '',
+      }
+      : requestedNextTurnSettings;
   const currentModel = nextTurnSettings.available === true && nextTurnSettings.model?.available === true
     ? nextTurnSettings.model
     : modelInfoFromId('');
@@ -3447,9 +3660,14 @@ function parseCodexStatus(options = {}) {
     reasoningMode: parsedReasoningMode,
     speed: parsedSpeedMode,
   };
-  const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
+  // A transiently unavailable composer DOM must not erase capabilities that are
+  // already known from the active thread's observed model.  Keep confirmation
+  // strict (currentModel remains unavailable), but still expose the real model's
+  // reasoning and service-tier choices to the client.
+  const optionModel = currentModel.available === true ? currentModel : parsedModel;
+  const speedSupported = optionModel.available === true && codexModelSupportsSpeed(optionModel);
   const modelOptions = modelOptionsForClient(liveModeOptions);
-  const reasoningOptions = reasoningOptionsForCurrentModel(currentModel, liveModeOptions);
+  const reasoningOptions = reasoningOptionsForCurrentModel(optionModel, liveModeOptions);
   const speedOptions = resolveLiveSpeedOptions(speedSupported, currentSpeed, liveModeOptions);
   const threadId = threadIdFromSessionFile(file);
   const failed = completed && !final && (emptyComplete || Boolean(failureText));
@@ -3540,7 +3758,10 @@ async function handleCodexStatus(req, res) {
         observationSource: nextTurnSettings.source,
       },
     ) || status.currentSpeed;
-    status.reasoningOptions = reasoningOptionsForCurrentModel(status.currentModel, liveModeOptions);
+    const optionModel = status.currentModel?.available === true ? status.currentModel : status.model;
+    status.reasoningOptions = reasoningOptionsForCurrentModel(optionModel, liveModeOptions);
+    status.speedSupported = optionModel?.available === true && codexModelSupportsSpeed(optionModel);
+    status.speedOptions = resolveLiveSpeedOptions(status.speedSupported, status.currentSpeed, liveModeOptions);
     return json(res, 200, status);
   } catch (error) {
     return json(res, 500, { ok: false, code: 'CODEX_STATUS_FAILED', message: '读取 Codex 回复状态失败。', detail: String(error && error.message || error) });
@@ -4211,7 +4432,9 @@ async function cdpEvaluate(client, expression) {
     awaitPromise: true,
   });
   if (result.exceptionDetails) {
-    throw new Error(result.exceptionDetails.text || 'Codex CDP evaluation failed.');
+    const exception = result.exceptionDetails.exception || {};
+    const detail = exception.description || exception.value || result.exceptionDetails.text;
+    throw new Error(String(detail || 'Codex CDP evaluation failed.'));
   }
   return result.result && result.result.value;
 }
@@ -5384,7 +5607,7 @@ function codexPlusMenuItemsFromSnapshot(snapshot = {}) {
 async function readCodexPlusMenuItemsViaCdp() {
   await restoreCodexDesktopWindow();
   const target = await findCodexCdpTarget();
-  const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
+  const client = await connectCdpWebSocket(target.webSocketDebuggerUrl, CODEX_PLUS_MENU_CDP_TIMEOUT_MS);
   try {
     await client.call('Runtime.enable').catch(() => {});
     await client.call('Page.enable').catch(() => {});
@@ -5406,11 +5629,17 @@ async function readCodexPlusMenuItemsViaCdp() {
       await delay(420);
       let collected = [];
       let latestSnapshot = await readCodexModeMenuSnapshot(client);
-      for (let index = 0; index < 6; index += 1) {
+      let previousViewportKey = '';
+      let unchangedViewports = 0;
+      for (let index = 0; index < CODEX_PLUS_MENU_MAX_SCROLL_STEPS; index += 1) {
         const visibleItems = codexPlusMenuItemsFromSnapshot(latestSnapshot);
         collected = mergeCodexPlusMenuItems(collected, visibleItems);
         if (hasAllKnownCodexPlusMenuRows(collected)) break;
-        await scrollCodexPlusMenuInCdpClient(client, latestSnapshot, 360);
+        const viewportKey = visibleItems.map(codexPlusMenuItemKey).join('|');
+        unchangedViewports = viewportKey && viewportKey === previousViewportKey ? unchangedViewports + 1 : 0;
+        previousViewportKey = viewportKey;
+        if (unchangedViewports >= 2) break;
+        await scrollCodexPlusMenuInCdpClient(client, latestSnapshot, 720);
         latestSnapshot = await readCodexModeMenuSnapshot(client);
       }
       return {
@@ -5423,7 +5652,7 @@ async function readCodexPlusMenuItemsViaCdp() {
       await delay(220);
       result = await readOpenedPlusItems();
     }
-    const items = result.items;
+    const items = publishableMenuItems(result.items);
     if (!items.length) {
       const error = new Error('Codex plus menu items were not found.');
       error.status = 502;
@@ -5465,13 +5694,19 @@ async function clickCodexPlusRectWithoutSendCheck(client, rect = {}) {
   const y = Math.round(Number(rect.y || 0) + Number(rect.h || rect.height || 0) / 2);
   await assertSafeCdpClickTarget(client, x, y);
   try {
+    await clickCodexPlusButtonDomFallback(client, rect);
+    return;
+  } catch {
+    // Fall through to guarded CDP input for older renderer builds.
+  }
+  try {
     await client.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
     await delay(80);
     await client.call('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
     await delay(40);
     await client.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
   } catch (error) {
-    await clickCodexPlusButtonDomFallback(client, rect);
+    throw error;
   }
 }
 
@@ -5757,8 +5992,9 @@ function resolveLiveSpeedOptions(speedSupported, currentSpeed = null, liveModeOp
   if (!speedSupported) return [];
   const liveOptions = liveModeOptions && Array.isArray(liveModeOptions.speedOptions) ? liveModeOptions.speedOptions : [];
   const current = currentSpeed && currentSpeed.available ? currentSpeed : null;
-  const merged = uniqueModeOptions([current, ...liveOptions, ...Object.values(SPEED_MODE_TARGETS)].filter(Boolean));
-  return merged.length ? merged : Object.values(SPEED_MODE_TARGETS);
+  const catalogDefaults = modelOptionUtils.speedOptionsForModel({ speedSupported: true }, [], SPEED_MODE_TARGETS);
+  const merged = uniqueModeOptions([...catalogDefaults, ...liveOptions, current].filter(Boolean));
+  return merged.length ? merged : catalogDefaults;
 }
 
 async function readCodexModeOptionsViaCdp() {
@@ -7237,13 +7473,27 @@ async function switchCodexSpeedMode(threadId = '', targetKey = '') {
   const configModel = modelInfoFromId(tomlStringValue(readCodexConfigText(), 'model'));
   const parsedModel = file ? currentModelFromItems(readJsonlTailObjects(file, CODEX_SESSION_TAIL_BYTES)) : configModel;
   const controlOverrides = readAppState().controlOverrides || {};
-  const currentMode = controlOverrideSpeed(controlOverrides, current) || configSpeed || (current.key ? current : configSpeed);
+  const currentMode = firstAvailableControlValue(
+    controlOverrideSpeed(controlOverrides, current),
+    current,
+    configSpeed,
+  ) || speedModeFromValue('');
   const liveModeState = await readLiveCodexComposerModeState({ threadId });
   const liveModel = liveModeState && liveModeState.model && liveModeState.model.available ? liveModeState.model : null;
-  const currentModel = controlOverrideModel(controlOverrides, parsedModel) || configModel || liveModel ||
-    (parsedModel && parsedModel.available ? parsedModel : configModel);
+  const confirmedModel = controlOverrideModel(controlOverrides, parsedModel);
+  const reconciledLiveModel = preferConfirmedControlValue(confirmedModel, liveModel, {
+    observedAt: liveModeState && liveModeState.observedAt,
+    observationSource: liveModeState && liveModeState.source,
+  });
+  const currentModel = firstAvailableControlValue(
+    reconciledLiveModel,
+    liveModel,
+    confirmedModel,
+    parsedModel,
+    configModel,
+  ) || modelInfoFromId('');
   if (!codexModelSupportsSpeed(currentModel)) {
-    const error = new Error('当前模型不支持速度调节；只有 GPT-5.5 和 GPT-5.4 支持速度选项。');
+    const error = new Error('当前模型没有提供速度选项。');
     error.status = 400;
     error.code = 'SPEED_UNSUPPORTED_MODEL';
     throw error;
@@ -8312,9 +8562,13 @@ async function handleClientConfig(req, res) {
       observationSource: nextTurnSettings.source,
     },
   ) || speedModeFromValue('');
-  const speedSupported = currentModel.available === true && codexModelSupportsSpeed(currentModel);
+  // Config is only a capability fallback here; it does not confirm the live
+  // composer selection.  This keeps the UI honest while retaining Standard and
+  // Fast choices when ChatGPT temporarily withholds composer DOM state.
+  const optionModel = currentModel.available === true ? currentModel : configModel;
+  const speedSupported = optionModel.available === true && codexModelSupportsSpeed(optionModel);
   const modelOptions = modelOptionsForClient(liveModeOptions);
-  const reasoningOptions = reasoningOptionsForCurrentModel(currentModel, liveModeOptions);
+  const reasoningOptions = reasoningOptionsForCurrentModel(optionModel, liveModeOptions);
   const speedOptions = resolveLiveSpeedOptions(speedSupported, currentSpeed, liveModeOptions);
   const localRoutes = [
     { id: 'desktop-local', kind: 'desktop-local', label: '本机', baseUrl: getDesktopLocalBase(PORT), priority: 0 },
@@ -8807,6 +9061,16 @@ async function runExplicitProcessControlHttpAction(req, res) {
 
   const requestedThreadId = typeof payload.threadId === 'string' ? payload.threadId.trim() : '';
   const threadId = requestedThreadId || 'desktop-control';
+  const cdpProcesses = await findRunningCodexCdpPorts({ includeProcessIds: true }).catch(() => []);
+  const boundWindows = codexCdpProcessId > 0
+    ? explicitWin32FocusAdapter.listTopLevelWindows({ processId: codexCdpProcessId })
+    : [];
+  codexCdpProcessId = reconcileCdpProcessBinding({
+    port: codexCdpPort,
+    currentProcessId: codexCdpProcessId,
+    processes: cdpProcesses,
+    currentWindows: boundWindows,
+  });
   const intent = createExplicitUiIntent({
     id: crypto.randomUUID(),
     action: 'control.enable',
@@ -8956,12 +9220,10 @@ process.on('exit', () => {
 process.on('SIGINT', () => {
   cleanupKeepAwake();
   stopV3Runtime();
-  stopPushWatchTimer();
   process.exit(130);
 });
 process.on('SIGTERM', () => {
   cleanupKeepAwake();
   stopV3Runtime();
-  stopPushWatchTimer();
   process.exit(143);
 });

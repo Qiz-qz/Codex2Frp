@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyMenuItem, isExecutableMenuItem } = require('../lib/control/composer-menu-classifier');
+const { classifyMenuItem, isExecutableMenuItem, publishableMenuItems } = require('../lib/control/composer-menu-classifier');
 
 test('stable composer attributes distinguish plugins, subagents, and built-in actions', () => {
   assert.equal(classifyMenuItem({ group: 'Subagents', action: 'spawnAgent', label: 'backend audit' }).kind, 'subagent');
@@ -45,4 +45,15 @@ test('aria and data metadata classify subagents without leaking opaque values', 
   });
   assert.deepEqual(classified, { kind: 'subagent', executable: true });
   assert.doesNotMatch(JSON.stringify(classified), /PRIVATE_PROMPT/);
+});
+
+test('mobile plus-menu publication drops unverified names instead of inventing an Other section', () => {
+  const rows = publishableMenuItems([
+    { label: 'backend_audit', section: 'Other', kind: 'unknown', disabled: true },
+    { label: 'Documents', section: '插件', kind: 'plugin', disabled: false },
+  ]);
+
+  assert.deepEqual(rows, [
+    { label: 'Documents', section: '插件', kind: 'plugin', disabled: false },
+  ]);
 });

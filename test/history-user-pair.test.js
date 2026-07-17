@@ -38,6 +38,21 @@ test('legacy history pairs name-only wrapper rows by ordinal but preserves diffe
   assert.deepEqual(result.message.attachments, next.attachments);
 });
 
+test('paired ChatGPT inline image representations remain one canonical image per ordinal', () => {
+  const eventCopy = {
+    text: '图片', attachments: [{ name: 'image-1', dataUrl: 'data:image/png;base64,event-copy' }],
+    representation: 'event_msg', timestamp: '2026-07-17T10:05:00.000Z',
+  };
+  const canonical = {
+    text: '图片', attachments: [{ name: 'image-1', dataUrl: 'data:image/png;base64,canonical-copy' }],
+    representation: 'response_item', timestamp: '2026-07-17T10:05:00.001Z',
+  };
+
+  const result = mergeAdjacentUserHistoryMessage(eventCopy, canonical);
+  assert.equal(result.duplicate, true);
+  assert.deepEqual(result.message.attachments, canonical.attachments);
+});
+
 test('legacy history never collapses independent same-text records from the same representation', () => {
   const previous = {
     text: '确认', attachments: [], representation: 'response_item', recordId: 'user-1',

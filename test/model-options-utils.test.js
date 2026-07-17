@@ -11,6 +11,7 @@ const {
   modelOptionsForClient,
   reasoningOptionsForModel,
   modelSupportsSpeed,
+  speedOptionsForModel,
   normalizeModelOption,
 } = require('../lib/model-options');
 
@@ -136,4 +137,21 @@ test('speed support is read from model catalog metadata', () => {
 
   assert.equal(modelSupportsSpeed('gpt-6.1-fast', catalog), true);
   assert.equal(modelSupportsSpeed('gpt-6.1-mini', catalog), false);
+});
+
+test('the current GPT-5.6 Sol desktop model exposes standard and fast speeds even before catalog refresh', () => {
+  assert.equal(modelSupportsSpeed('gpt-5.6-sol', []), true);
+  assert.deepEqual(speedOptionsForModel('gpt-5.6-sol', []).map(option => option.key), ['standard', 'fast']);
+});
+
+test('a fast-capable catalog model always exposes both implicit standard and advertised fast speed', () => {
+  const catalog = [normalizeModelOption({
+    slug: 'gpt-5.6-sol',
+    display_name: 'GPT-5.6-Sol',
+    additional_speed_tiers: ['fast'],
+    service_tiers: [{ id: 'priority' }],
+  })];
+  const model = modelInfoFromId('gpt-5.6-sol', catalog);
+
+  assert.deepEqual(speedOptionsForModel(model, catalog).map(option => option.key), ['standard', 'fast']);
 });

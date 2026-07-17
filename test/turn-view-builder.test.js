@@ -232,6 +232,23 @@ test('each initial or steer user message opens one stable presentation segment o
   assert.deepEqual(turns.map(turn => turn.state), ['completed', 'completed', 'completed']);
 });
 
+test('task_started before the first current user record does not create an empty duplicate presentation', () => {
+  const turnId = 'turn-current-first-user';
+  const turns = buildTurnViews([
+    { type: 'turn', state: 'started', turnId, eventId: 'turn-start' },
+    { type: 'message', role: 'user', text: '真实首条任务', delivery: 'steer', turnId,
+      eventId: 'first-user' },
+    { type: 'summary', summaryKind: 'commentary', text: '正在处理', body: '进展', turnId,
+      eventId: 'commentary' },
+    { type: 'message', role: 'assistant', phase: 'final_answer', text: '完成', turnId,
+      eventId: 'final' },
+    { type: 'turn', state: 'completed', turnId, eventId: 'turn-complete' },
+  ], THREAD);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].user.text, '真实首条任务');
+  assert.equal(turns[0].final.text, '完成');
+});
+
 test('paired raw user representations form one steer presentation and merge safe file metadata', () => {
   const turnId = 'turn-paired-user-presentation';
   const turns = buildTurnViews([
@@ -244,7 +261,7 @@ test('paired raw user representations form one steer presentation and merge safe
       turnId, eventId: 'commentary-after-pair' },
   ], THREAD);
 
-  assert.equal(turns.length, 2, 'the original turn shell plus one user presentation remain distinct');
+  assert.equal(turns.length, 1, 'the current first user message fills the running shell without a desktop-invisible duplicate');
   assert.equal(turns.filter(turn => turn.user?.text === '检查附件').length, 1);
   const userTurn = turns.find(turn => turn.user?.text === '检查附件');
   assert.equal(userTurn.turnId, turnId);

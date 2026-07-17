@@ -492,6 +492,6 @@ test('structured history recursively exposes capability attachment DTOs without 
   const serialized = JSON.stringify(httpResponse);
   assert.match(serialized, new RegExp(`/codex/attachment/${handle}`));
   assert.equal(serialized.includes('filePath'), false);
-  assert.equal(serialized.includes('dataUrl'), false);
+  assert.equal(serialized.includes('dataUrl'), true);
   assert.equal(serialized.includes(originalPath), false);
 });

@@ -154,7 +154,7 @@ test('desktop composer plus menu can be read as grouped mobile options', () => {
   assert.match(readerBody, /data-list-navigation-item/, 'reader only returns real Codex list-navigation rows');
   assert.match(serverSource, /function mergeCodexPlusMenuItems/, 'reader can merge rows collected across multiple menu scroll positions');
   assert.match(serverSource, /async function scrollCodexPlusMenuInCdpClient/, 'reader can scroll the opened desktop plus menu');
-  assert.match(readerBody, /for \(let index = 0; index < 6; index \+= 1\)/, 'reader checks more than the first visible plus-menu page');
+  assert.match(readerBody, /CODEX_PLUS_MENU_MAX_SCROLL_STEPS/, 'reader checks the full virtualized plus-menu instead of one fixed viewport');
   assert.match(readerBody, /mergeCodexPlusMenuItems\(collected,\s*visibleItems\)/, 'reader keeps rows from earlier and later scroll positions');
   assert.match(functionBody('readCodexModeMenuSnapshot'), /lines:\s*linesOf\(el\)/, 'CDP snapshots preserve menu row line breaks for dynamic plugin titles');
   assert.doesNotMatch(functionBody('codexPlusMenuItemsFromSnapshot'), /findKnownCodexPlusMenuRow\(item\.text\)/, 'plus menu reader does not drop newly installed plugin rows just because they are not hard-coded');
@@ -222,7 +222,8 @@ test('plus menu insertion is verified and can be removed from the Codex composer
   const plusClickBody = functionBody('clickCodexPlusRectWithoutSendCheck');
   assert.match(selectBody, /hasCodexRunningStopControl\(snapshot\)/, 'plus-menu insertion refuses to report success while Codex is actively running');
   assert.match(plusClickBody, /assertSafeCdpClickTarget\(client,\s*x,\s*y\)/, 'plus-menu opening uses the same dangerous-click guard as other CDP clicks');
-  assert.match(plusClickBody, /catch \(error\)[\s\S]*clickCodexPlusButtonDomFallback\(client,\s*rect\)/, 'plus-menu opening falls back only after the guarded mouse click path stalls');
+  assert.match(plusClickBody, /assertSafeCdpClickTarget\(client,\s*x,\s*y\)[\s\S]*clickCodexPlusButtonDomFallback\(client,\s*rect\)/,
+    'plus-menu opening prefers the guarded renderer action before slower CDP mouse dispatch');
   assert.match(functionBody('assertSafeCdpClickTarget'), /isCodexStopControlText\(text\)/, 'low-level CDP click guard refuses stop and interruption controls even if selectors are wrong');
   assert.match(functionBody('clickCodexPlusMenuItemWithFallback'), /readCodexComposerReferenceStateInCdpClient\(client,\s*labels\)/, 'plus-menu item fallback is only used after checking whether the reference was inserted');
   assert.match(selectBody, /clickCodexPlusMenuItemWithFallback\(client,\s*item,\s*targetLabels,\s*actual\)/, 'plus-menu selection uses the typed verified click helper instead of a bare mouse click');
@@ -387,7 +388,8 @@ test('speed switch uses the Codex submenu and never submits commands as tasks', 
   assert.match(switchBody, /trySyncCodexSpeedViaExistingCdp\(target,\s*threadId\)/, 'speed switch syncs the visible Codex client when control is already enabled');
   assert.match(switchBody, /trySwitchCodexSpeedViaConfig\(liveTargetSpeed \|\| target\)/, 'speed switch persists config only after live verification');
   assert.doesNotMatch(switchBody, /focusTarget\('codex'/, 'speed switch must not focus or open a new Codex client as a side effect');
-  assert.match(switchBody, /controlOverrideModel\(controlOverrides,\s*parsedModel\) \|\| configModel \|\| liveModel/, 'speed switch respects App/config model before stale live window data');
+  assert.match(switchBody, /preferConfirmedControlValue\(confirmedModel,\s*liveModel[\s\S]*firstAvailableControlValue\([\s\S]*reconciledLiveModel[\s\S]*liveModel[\s\S]*confirmedModel[\s\S]*parsedModel[\s\S]*configModel/,
+    'speed switch reconciles a fresh exact desktop model before historical session or config fallbacks');
   assert.match(functionBody('trySwitchCodexSpeedViaConfig'), /writeCodexConfigStringValue\('service_tier'/, 'speed switch can use the real Codex service_tier config');
   assert.match(functionBody('trySwitchCodexSpeedViaConfig'), /verifiedBy\s*=\s*'config-write'/, 'speed config path is reported as a verified config write');
   assert.match(functionBody('trySyncCodexSpeedViaExistingCdp'), /requireExistingCodexCdpTargetForSwitch\('speed'\)/, 'live speed sync requires an existing CDP client without auto-opening one');
@@ -407,10 +409,13 @@ test('speed switch uses the Codex submenu and never submits commands as tasks', 
   assert.match(functionBody('selectCodexComposerModeMenuItemViaCdp'), /speedTargetKeys/, 'speed switch normalizes speed targets before matching menu items');
   assert.match(functionBody('selectCodexComposerModeMenuItemViaCdp'), /speedModeFromMenuText\(text\)/, 'speed switch does not partially match the reasoning 高 item as 高速');
   assert.match(functionBody('codexModelSupportsSpeed'), /modelOptionUtils\.modelSupportsSpeed/, 'backend speed gate uses model catalog metadata before compatibility fallbacks');
+  assert.match(functionBody('switchCodexSpeedMode'), /firstAvailableControlValue\([\s\S]*liveModel[\s\S]*parsedModel[\s\S]*configModel/,
+    'speed switching ignores unavailable placeholders while preferring exact live composer evidence');
   assert.match(switchBody, /SPEED_UNSUPPORTED_MODEL/, 'speed switch rejects models without a speed submenu');
   assert.match(webSource, /function modelSupportsSpeed/, 'web frontend derives speed support from the selected model');
   assert.match(functionBody('modelSupportsSpeed', webSource), /gpt55/, 'web speed gate accepts GPT5.5 names without a dot');
   assert.match(functionBody('modelSupportsSpeed', webSource), /gpt54/, 'web speed gate accepts GPT5.4 names without a dot');
+  assert.match(functionBody('modelSupportsSpeed', webSource), /gpt56sol/, 'web speed gate accepts the current GPT-5.6 Sol model');
   assert.match(webSource, /function updateSpeedSupportFromModel/, 'web frontend centralizes speed menu visibility updates');
   assert.match(webSource, /updateSpeedSupportFromModel\(data\.targetModel/, 'web frontend refreshes speed visibility after model switching');
   assert.match(webSource, /data\?\.targetModel \|\| data\?\.currentModel \|\| data\?\.model/, 'web frontend uses confirmed status model data before showing speed controls');
@@ -463,7 +468,7 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(controlPortResolverBody, /readLiveCodexModeOptionsBounded\(\{\s*force:\s*true\s*\}\)/, 'explicit control-port setup refreshes live menu choices without blocking indefinitely');
 
   const catalogBody = functionBody('readModelCatalogOptions');
-  assert.match(catalogBody, /models_cache\.json/, 'model options fall back to Codex desktop models_cache.json');
+  assert.match(catalogBody, /CODEX_MODEL_CACHE_FILE/, 'model options fall back to the configured CODEX_HOME models_cache.json');
 
   const findBody = functionBody('findModelOption');
   assert.match(findBody, /displayName|label/, 'model switching accepts visible Codex model names');
@@ -481,10 +486,19 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(statusBody, /liveModeOptions/, 'status returns live Codex menu options to mobile clients');
   assert.match(statusBody, /modelOptions/, 'status exposes live model choices');
   assert.match(statusBody, /speedOptions/, 'status exposes live speed choices');
+  assert.match(statusBody, /optionModel\s*=\s*currentModel\.available\s*===\s*true\s*\?\s*currentModel\s*:\s*parsedModel/,
+    'status preserves model capabilities from the observed turn while live composer confirmation is unavailable');
   assert.match(serverSource, /resolveLiveSpeedOptions/, 'status/config merge the current speed with live speed menu choices');
-  assert.match(functionBody('resolveLiveSpeedOptions'), /Object\.values\(SPEED_MODE_TARGETS\)/, 'speed options fall back to standard and fast without opening Codex menus');
+  assert.match(functionBody('resolveLiveSpeedOptions'), /speedOptionsForModel[\s\S]*SPEED_MODE_TARGETS/, 'speed options include implicit standard and advertised fast without opening Codex menus');
   assert.doesNotMatch(statusBody, /overrideModel|configModel|configReasoningMode|configSpeedMode/,
     'exact current composer settings never fall back to an override, config, or prior turn');
+  const statusHandlerBody = functionBody('handleCodexStatus');
+  assert.match(statusHandlerBody, /optionModel\s*=\s*status\.currentModel\?\.available\s*===\s*true\s*\?\s*status\.currentModel\s*:\s*status\.model/,
+    'status response retains observed-model capabilities after strict live confirmation reconciliation');
+  assert.match(statusHandlerBody, /status\.speedOptions\s*=\s*resolveLiveSpeedOptions/,
+    'status response recomputes Standard and Fast choices after confirmed-model reconciliation');
+  assert.match(functionBody('handleClientConfig'), /optionModel\s*=\s*currentModel\.available\s*===\s*true\s*\?\s*currentModel\s*:\s*configModel/,
+    'config preserves model capabilities without claiming an unobserved live selection');
   assert.match(serverSource, /async function readCodexComposerModeStateViaCdp/, 'backend reads the live mode button state as structured data');
   const composerStateBody = functionBody('readCodexComposerModeStateViaCdp');
   assert.match(composerStateBody, /button\[data-codex-intelligence-trigger="true"\]/,
@@ -590,8 +604,9 @@ test('process image tool calls carry renderable attachment URLs for mobile', () 
   assert.match(serverSource, /function enrichAttachmentList\(attachments,\s*req,\s*options = \{\}\)/, 'attachment enrichment can tune payload size per endpoint');
   assert.match(functionBody('enrichAttachmentList'), /const inlineData = options\.inlineData !== false/, 'attachment enrichment keeps inline image fallback enabled by default');
   assert.match(functionBody('enrichAttachmentList'), /inlineData \? \{ dataUrl: inlineAttachmentDataUrl/, 'enriched local attachments expose inline image data only when the endpoint allows it');
+  assert.match(functionBody('enrichHistoryMessage'), /inlineData:\s*true/, 'history message images expose bounded validated inline data for reliable local viewing');
   assert.match(functionBody('enrichStatusAttachments'), /enrichAttachmentList\(step\.attachments,\s*req,\s*\{\s*inlineData:\s*false\s*\}\)/, 'live status process images avoid base64 inlining during frequent polling');
-  assert.match(functionBody('enrichHistoryMessage'), /enrichAttachmentList\(next\.attachments,\s*req,\s*\{\s*inlineData:\s*false\s*\}\)/, 'history message attachments avoid base64 inlining on long threads');
+  assert.match(functionBody('enrichHistoryMessage'), /enrichAttachmentList\(next\.attachments,\s*req,\s*\{\s*inlineData:\s*true\s*\}\)/, 'history message attachments inline only bounded validated images for local phone caching');
   assert.match(functionBody('enrichHistoryTurn'), /activities[\s\S]*detailActivities[\s\S]*enrichAttachmentList/, 'history process activities recursively enrich image attachments');
   assert.doesNotMatch(functionBody('enrichAttachmentList'), /url:\s*attachment\.url\s*\|\|/, 'stale localhost attachment URLs are not preserved');
   assert.match(serverSource, /function localImageFileExists/, 'local image attachments are validated before exposing them to mobile clients');
@@ -650,7 +665,8 @@ test('history responses include completed process cards with stable fold metadat
   assert.match(historyBody, /boundedSet\(threadHistoryCache/, 'parsed history cache is bounded');
   assert.match(historyBody, /new EventReconciler/, 'history builds structured activity through the same privacy reconciler as realtime');
   assert.match(historyBody, /historyReconciler\.rehydrate\(historyEntries\)/, 'history and realtime share lifecycle expansion and snapshot replacement');
-  assert.match(historyBody, /turns:\s*buildTurnViews/, 'history exposes stable structured turns for the mobile process card');
+  assert.match(historyBody, /const allTurns = buildTurnViews/, 'history builds stable structured turns before applying the page window');
+  assert.match(historyBody, /turns:\s*turnPage\.items/, 'history exposes the requested structured turn page for the mobile process card');
 });
 
 test('in-task user guidance stays as user history without splitting the active process turn', () => {
@@ -733,6 +749,12 @@ test('mode menu selection follows Codex nested model and speed menus', () => {
   assert.doesNotMatch(helperBody, /dispatchEvent\(new PointerEvent|dispatchEvent\(new MouseEvent/, 'mode menu selection does not rely on synthetic DOM mouse events');
 });
 
+test('long plus menus scan through virtualized subagent rows and publish only verified kinds', () => {
+  const reader = functionBody('readCodexPlusMenuItemsViaCdp');
+  assert.match(reader, /CODEX_PLUS_MENU_MAX_SCROLL_STEPS/, 'plugin discovery is not limited to six viewport scrolls');
+  assert.match(reader, /publishableMenuItems/, 'unknown desktop rows are removed before the mobile DTO is returned');
+});
+
 test('legacy history and status never expose task_complete last_agent_message fallbacks', () => {
   assert.doesNotMatch(functionBody('parseCodexThreadHistory'), /last_agent_message/, 'history accepts final answers only from main-thread final message items');
   assert.doesNotMatch(functionBody('parseCodexStatus'), /last_agent_message/, 'status never treats aggregated child-agent output as the main final answer');
@@ -756,4 +778,13 @@ test('explicit Codex controls restore minimized windows before plus menu and sto
   assert.match(functionBody('selectCodexPlusMenuItemViaCdp'), /restoreCodexDesktopWindow\(\)/, 'plus-menu item insertion restores minimized Codex before clicking');
   assert.match(serverSource, /async function activateCodexThread\(threadId = '', options = \{\}\)[\s\S]*openWindowsUri\('codex:\/\/'\)[\s\S]*restoreCodexDesktopWindow\(\)/, 'thread activation restores the app after codex:// navigation');
   assert.match(functionBody('pressCancelCodexResponse'), /restoreCodexDesktopWindow\(\)[\s\S]*sendWindowsKeys\('\{ESC\}'\)/, 'stop command restores the app before sending cancellation keys');
+});
+
+test('current ChatGPT inline user images become validated capability-backed history attachments', () => {
+  assert.match(functionBody('extractUserAttachments'), /payload\.content[\s\S]*input_image[\s\S]*materializeHistoryImageSource/,
+    'both event_msg images and response_item input_image blocks enter the same history attachment path');
+  assert.match(functionBody('materializeHistoryImageSource'), /attachmentStore\.saveBatch[\s\S]*attachmentStore\.read[\s\S]*HISTORY_ATTACHMENT_CACHE_DIR/,
+    'inline image bytes are validated by the attachment store before a local capability source is created');
+  assert.match(functionBody('registerHistoryEventAttachments'), /materializeHistoryImageSource/,
+    'structured turn history uses the same materialized image as the legacy message projection');
 });

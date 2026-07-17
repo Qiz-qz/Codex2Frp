@@ -838,7 +838,9 @@
         model?.version,
         typeof model === 'string' ? model : '',
       ].map(modelSpeedKey).filter(Boolean);
-      return candidates.some(key => key === 'gpt5.5' || key === 'gpt5.4' || key === 'gpt55' || key === 'gpt54' || key === '5.5' || key === '5.4' || key === '55' || key === '54');
+      return candidates.some(key => key === 'gpt5.6sol' || key === 'gpt56sol' || key === '5.6sol' || key === '56sol'
+        || key === 'gpt5.5' || key === 'gpt5.4' || key === 'gpt55' || key === 'gpt54'
+        || key === '5.5' || key === '5.4' || key === '55' || key === '54');
     }
     function updateSpeedSupportFromModel(model = currentModelInfo, forced = null) {
       speedSupported = typeof forced === 'boolean' ? forced : modelSupportsSpeed(model);

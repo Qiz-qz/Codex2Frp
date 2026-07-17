@@ -28,6 +28,14 @@ const PROFILE_0144 = require(path.join(
   'profiles',
   'v0144-profile.json',
 ));
+const PROFILE_0145_ALPHA18_FILE = path.join(
+  __dirname,
+  '..',
+  'lib',
+  'app-server',
+  'profiles',
+  'v0145_alpha18-profile.json',
+);
 
 function legacyObservation(overrides = {}) {
   const requestMethods = PROFILE_0144.requestMethods || PROFILE_0144.requiredRequestMethods;
@@ -111,8 +119,41 @@ test('profile selection is exact and fails closed for unknown CLI versions', () 
   assert.equal(path.basename(known), 'v0144-profile.json');
   assert.equal(path.basename(profileFileForCliVersion('0.144.2')), 'v0144_2-profile.json');
   assert.equal(path.basename(profileFileForCliVersion('0.144.5')), 'v0144_2-profile.json');
+  assert.equal(
+    path.basename(profileFileForCliVersion('0.145.0-alpha.18')),
+    'v0145_alpha18-profile.json',
+  );
   assert.equal(profileFileForCliVersion('0.145.0'), '');
   assert.equal(profileFileForCliVersion(''), '');
+});
+
+test('0.145.0-alpha.18 profile pins the installed schema hash and exact observed shape', () => {
+  const profile = require(PROFILE_0145_ALPHA18_FILE);
+  assert.equal(profile.id, 'app-server-v0145_alpha18');
+  assert.equal(profile.schemaVersion, '0.145.0-alpha.18');
+  assert.deepEqual(profile.cliVersions, ['0.145.0-alpha.18']);
+  assert.equal(profile.schemaHash, '012e15b26a0a0ac219e6788e19dbdd1c66c4b34023c4cf47b15d1814d39af340');
+  assert.ok(profile.requestMethods.includes('environment/status'));
+  assert.ok(profile.notificationMethods.includes('thread/environment/connected'));
+  assert.ok(profile.notificationMethods.includes('thread/environment/disconnected'));
+  assert.ok(profile.typeUnions['v2/LoginAccountParams'].includes('amazonBedrock'));
+
+  const result = negotiateSchemaProfile({
+    cliVersion: '0.145.0-alpha.18',
+    schemaHash: profile.schemaHash,
+    methods: profile.requestMethods,
+    types: profile.typeUnions,
+  });
+  assert.equal(result.compatible, true);
+  assert.equal(result.profile.id, 'app-server-v0145_alpha18');
+
+  const extraMethod = negotiateSchemaProfile({
+    cliVersion: '0.145.0-alpha.18',
+    schemaHash: profile.schemaHash,
+    methods: [...profile.requestMethods, 'future/privateMethod'],
+    types: profile.typeUnions,
+  });
+  assert.deepEqual(extraMethod, { compatible: false, profile: null, reason: 'schema_shape_mismatch' });
 });
 
 test('0.144.2 negotiates by validated schema hash', () => {
@@ -147,6 +188,7 @@ test('negotiator loads both legacy and current schema profiles', () => {
   assert.deepEqual(profiles().map(profile => profile.id).sort(), [
     'app-server-v0144',
     'app-server-v0144_2',
+    'app-server-v0145_alpha18',
   ]);
 });
 

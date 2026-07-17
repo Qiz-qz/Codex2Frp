@@ -114,6 +114,20 @@ test('dynamic Codex discovery falls back to visible legacy Codex.exe windows', (
   assert.deepEqual(discoverCodexWindow(adapter), legacy);
 });
 
+test('dynamic Codex discovery accepts the current ChatGPT process name without an exe suffix', () => {
+  const current = {
+    handle: 'current-chatgpt',
+    processId: 202,
+    processName: 'ChatGPT',
+    title: 'ChatGPT',
+    visible: true,
+    ownerHandle: null,
+  };
+  const adapter = createWin32Adapter({ windows: [current] });
+
+  assert.deepEqual(discoverCodexWindow(adapter), current);
+});
+
 for (const showState of Object.values(WINDOW_SHOW_STATES)) {
   test(`window session restores ${showState} placement and the original foreground window`, () => {
     const originalPlacement = {

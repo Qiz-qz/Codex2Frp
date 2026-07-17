@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.5] - 2026-07-17
+
+This public snapshot corresponds to the internal Codex2Frp 2.4.5 capability line while preserving the public repository's independent version history.
+
+- ChatGPT and Codex desktop process/window names are normalized for explicit control while preserving exact focus, minimized-state, and protected-task restoration.
+- Supported models expose both Standard and Fast speed options; deep Add-menu scanning publishes classified plugins and suppresses unknown subagent names.
+- Cursor pagination and adaptive reverse history reads remove the previous fixed-window ceiling without dropping or duplicating messages.
+- The exact Codex CLI `0.145.0-alpha.18` schema is pinned, including environment status requests and environment connection notifications.
+- Current renderer RPC discovery, process rebinding, and clean shutdown handling restore model, reasoning, speed, task switching, new-task, send, stop, and approval controls after the desktop application rename to ChatGPT.
+- Expands the side-effect-free public backend suite to 730 passing tests.
+
 ## [1.4.4] - 2026-07-17
 
 This public snapshot corresponds to the internal Codex2Frp 2.4.4 capability line while preserving the public repository's independent version history.

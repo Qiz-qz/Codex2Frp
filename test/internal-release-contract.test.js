@@ -8,19 +8,19 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('public 1.4.4 release sources stay version-aligned and documented', () => {
+test('public 1.4.5 release sources stay version-aligned and documented', () => {
   const pkg = JSON.parse(read('package.json'));
   const launcher = read('windows/launcher/Codex2FrpLauncher.cs');
   const manifest = read('windows/installer/Codex2FrpSetup.manifest');
   const readme = read('README.md');
   const changelog = read('CHANGELOG.md');
-  assert.equal(pkg.version, '1.4.4');
-  assert.match(launcher, /internal const string AppVersion = "1\.4\.4";/);
-  assert.match(manifest, /assemblyIdentity version="1\.4\.4\.0"/);
-  assert.match(readme, /Current version: `v1\.4\.4`/);
-  assert.match(readme, /internal Codex2Frp 2\.4\.4 capability line/i);
-  assert.match(changelog, /## \[1\.4\.4\]/);
-  for (const topic of ['model', 'reasoning', 'confirmation lease', 'queued', 'bootstrap context']) {
+  assert.equal(pkg.version, '1.4.5');
+  assert.match(launcher, /internal const string AppVersion = "1\.4\.5";/);
+  assert.match(manifest, /assemblyIdentity version="1\.4\.5\.0"/);
+  assert.match(readme, /Current version: `v1\.4\.5`/);
+  assert.match(readme, /internal Codex2Frp 2\.4\.5 capability line/i);
+  assert.match(changelog, /## \[1\.4\.5\]/);
+  for (const topic of ['ChatGPT', 'speed', 'plugin', 'pagination', '0.145.0-alpha.18']) {
     assert.match(changelog, new RegExp(topic, 'i'));
   }
 });

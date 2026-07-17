@@ -44,6 +44,29 @@ test('attachment-only desktop user events remain visible without leaking local p
   assert.doesNotMatch(JSON.stringify(event), /PRIVATE/);
 });
 
+test('current ChatGPT inline user images survive both desktop message representations', () => {
+  for (const item of [
+    {
+      type: 'event_msg', timestamp: '2026-07-17T00:00:00.000Z',
+      payload: { type: 'user_message', message: 'with image', local_images: [], images: [VALID_PNG_DATA_URL] },
+    },
+    {
+      type: 'response_item', timestamp: '2026-07-17T00:00:00.000Z',
+      payload: { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'with image' },
+        { type: 'input_image', image_url: VALID_PNG_DATA_URL },
+      ] },
+    },
+  ]) {
+    const event = createSessionNormalizer().normalize(item);
+    assert.equal(event.role, 'user');
+    assert.equal(event.text, 'with image');
+    assert.equal(event.attachments.length, 1);
+    assert.equal(event.attachments[0].mimeType, 'image/png');
+    assert.equal(event.attachments[0].dataUrl, VALID_PNG_DATA_URL);
+  }
+});
+
 test('list_agents output projects terminal lifecycle only and never agent content', () => {
   const normalizer = createSessionNormalizer();
   const callId = 'agents-call-1';
@@ -652,6 +675,16 @@ test('normalizer removes desktop-hidden bootstrap parts without hiding the real 
   assert.equal(JSON.stringify(event).includes('AGENTS.md instructions'), false);
 });
 
+test('current managed permission environment context stays desktop-hidden', () => {
+  const normalizer = createNormalizer();
+  const hidden = normalizer.normalize(sessionItem('response_item', {
+    type: 'message', role: 'user', content: [{ type: 'input_text', text:
+      '<environment_context>\n  <cwd>E:\\\\workspace</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-07-17</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <filesystem><workspace_roots><root>E:\\\\workspace</root></workspace_roots><permission_profile type="managed"><file_system type="restricted"><entry access="read"><special>:root</special></entry></file_system></permission_profile></filesystem>\n</environment_context>'
+    }]
+  }));
+  assert.equal(hidden, null);
+});
+
 test('turn reducer distinguishes active-turn steer, next-turn queue, and idle input', () => {
   const normalizer = createNormalizer();
   normalizer.normalize(sessionItem('event_msg', { type: 'task_started', turn_id: 'turn-main' }));
@@ -707,6 +740,17 @@ test('keeps sanitized main-task progress summaries as structured process bodies'
     ['commentary', 'plan', 'reasoning_summary'],
   );
   assert.equal(JSON.stringify([commentary, planning, reasoning]).includes('hidden'), false);
+});
+
+test('current ChatGPT turn_aborted closes the active turn as interrupted', () => {
+  const normalizer = createNormalizer();
+  normalizer.normalize(sessionItem('event_msg', { type: 'task_started', turn_id: 'turn-aborted-current' }));
+  const terminal = normalizer.normalize(sessionItem('event_msg', {
+    type: 'turn_aborted', turn_id: 'turn-aborted-current', reason: 'interrupted'
+  }));
+  assert.equal(terminal.state, 'interrupted');
+  const next = normalizer.normalize(responseMessage('user', '', '终止后的新输入', 'turn-next'));
+  assert.equal(next.delivery, 'initial');
 });
 
 test('summarizes tool calls without exposing arguments or outputs', () => {

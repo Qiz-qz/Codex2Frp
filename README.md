@@ -2,9 +2,9 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.4`.
+Current version: `v1.4.5`.
 
-This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.4 capability line while retaining the repository's independent `v1.x` public version history.
+This public release corresponds to the feature set developed on the internal Codex2Frp 2.4.5 capability line while retaining the repository's independent `v1.x` public version history.
 
 ## What It Does
 
@@ -28,7 +28,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.4/              Latest public installer release
+release/v1.4.5/              Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -37,25 +37,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.4/Codex2FrpSetup-v1.4.4.exe
+release/v1.4.5/Codex2FrpSetup-v1.4.5.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.4/SHA256SUMS.txt
+release/v1.4.5/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.4/SHA256SUMS.txt
+release/v1.4.5/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.4.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.5.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
