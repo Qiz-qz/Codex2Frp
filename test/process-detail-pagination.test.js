@@ -73,6 +73,18 @@ test('process detail revision ignores expiring attachment capability URLs', () =
   assert.equal(processDetailRevision(first), processDetailRevision(second));
 });
 
+test('process detail revision includes visible file identity metadata', () => {
+  const first = processWithActivities();
+  first.detailActivities[2] = {
+    ...first.detailActivities[2], fileLabel: 'src/first.js', changeKind: 'modified',
+  };
+  const second = processWithActivities();
+  second.detailActivities[2] = {
+    ...second.detailActivities[2], fileLabel: 'src/second.js', changeKind: 'renamed',
+  };
+  assert.notEqual(processDetailRevision(first), processDetailRevision(second));
+});
+
 test('process detail pagination rejects a stale revision after a visible source update', () => {
   const process = processWithActivities();
   const first = pageProcessDetailActivities(process, { limit: 2 });

@@ -1,0 +1,10 @@
+Codex2Frp public release 1.4.10
+Verified: 2026-07-18 Asia/Shanghai
+
+- Backend tests: 752/752 passed, 0 failed.
+- Node syntax check: passed.
+- Integration suite: 6 passed, 4 isolated live-app-server cases skipped by design.
+- Windows installer build: passed.
+- Installer bytes: 2051584.
+- Installer SHA-256: 64D8B5B1AFCD8AA9548B9B9F544F8D7988E75AFB8654757BD0A052EDA5ABD932.
+- GitHub release scope: backend only. No CodexHM HAP, APP, source, or signing material is included.

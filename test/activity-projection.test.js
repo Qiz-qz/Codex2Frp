@@ -55,6 +55,41 @@ test('durable activities aggregate only while visibly adjacent and details prese
   assert.equal(process.detailCount, 3);
 });
 
+test('paged process details retain safe command text and repository-relative file identity', () => {
+  const process = { activities: [], detailActivities: [], detailCount: 0, counts: {} };
+  appendProjectedActivity(process, {
+    id: 'command-detail', kind: 'shell', state: 'succeeded', title: '已运行命令',
+    operation: 'run', displayDetail: 'node tests/process-detail-pagination.test.js',
+  });
+  appendProjectedActivity(process, {
+    id: 'file-detail', kind: 'file', state: 'succeeded', title: '已更新文件',
+    operation: 'edit', fileLabel: 'lib/history/process-detail-pagination.js',
+    changeKind: 'modified', displayDetail: '+4 -1',
+  });
+
+  assert.equal(process.detailActivities[0].displayDetail,
+    'node tests/process-detail-pagination.test.js');
+  assert.deepEqual(process.detailActivities[1], {
+    id: 'file-detail', kind: 'file', state: 'succeeded', title: '已更新文件',
+    operation: 'edit', fileLabel: 'lib/history/process-detail-pagination.js',
+    changeKind: 'modified', displayDetail: '+4 -1',
+  });
+});
+
+test('process detail file identity rejects absolute and traversal labels', () => {
+  const process = { activities: [], detailActivities: [], detailCount: 0, counts: {} };
+  appendProjectedActivity(process, {
+    id: 'absolute', kind: 'file', state: 'succeeded', title: '已更新文件',
+    fileLabel: 'Q:\\Fixture\\secret.txt', changeKind: 'modified',
+  });
+  appendProjectedActivity(process, {
+    id: 'traversal', kind: 'file', state: 'succeeded', title: '已更新文件',
+    fileLabel: '../secret.txt', changeKind: 'modified',
+  });
+  assert.equal(Object.hasOwn(process.detailActivities[0], 'fileLabel'), false);
+  assert.equal(Object.hasOwn(process.detailActivities[1], 'fileLabel'), false);
+});
+
 test('commentary and plan use stable counted titles with terminal suffixes', () => {
   const process = { activities: [], detailActivities: [], detailCount: 0, counts: {} };
   appendProjectedActivity(process, {

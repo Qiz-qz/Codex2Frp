@@ -2,7 +2,7 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.9`.
+Current version: `v1.4.10`.
 
 This public release corresponds to the backend capability line for the current ChatGPT/Codex Desktop while retaining the repository's independent `v1.x` public version history.
 
@@ -28,7 +28,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.9/              Latest public installer release
+release/v1.4.10/             Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -37,25 +37,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.9/Codex2FrpSetup-v1.4.9.exe
+release/v1.4.10/Codex2FrpSetup-v1.4.10.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.9/SHA256SUMS.txt
+release/v1.4.10/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.9/SHA256SUMS.txt
+release/v1.4.10/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.9.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.10.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -197,6 +197,14 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.10
+
+- Restores the exact visible command text for current ChatGPT/Codex `shell_command` process events instead of publishing generic “run” placeholders.
+- Converts current direct `apply_patch` activity into privacy-safe repository-relative file rows with change kind and `+N/-N` summaries.
+- Carries command and file detail through completed-task projection and cursor pagination so the phone can expand dense process history without losing content.
+- Keeps raw tool arguments, output, absolute paths, traversal paths, credentials, and subagent message bodies outside the public DTO.
+- Expands the side-effect-free backend suite to 752 passing tests.
 
 ### v1.4.9
 

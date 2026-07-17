@@ -759,7 +759,7 @@ test('summarizes tool calls without exposing arguments or outputs', () => {
     type: 'function_call',
     name: 'shell_command',
     call_id: 'call-safe',
-    arguments: JSON.stringify({ command: SECRET_ARGUMENT }),
+    arguments: JSON.stringify({ command: 'node tests/smoke.mjs --token=PRIVATE_TOKEN' }),
   }));
   const output = normalizer.normalize(sessionItem('response_item', {
     type: 'function_call_output',
@@ -771,8 +771,36 @@ test('summarizes tool calls without exposing arguments or outputs', () => {
   assert.equal(call.summaryKind, 'tool');
   assert.equal(call.toolKind, 'command');
   assert.equal(call.text, '已运行命令');
+  assert.equal(call.displayDetail, '<redacted command>');
   assert.equal(output, null);
   assertNoSecretCanaries(assert, [call, output]);
+});
+
+test('current function shell calls publish only their sanitized visible command', () => {
+  const normalizer = createNormalizer();
+  const call = normalizer.normalize(sessionItem('response_item', {
+    type: 'function_call', name: 'shell_command', call_id: 'call-current-shell',
+    arguments: JSON.stringify({ command: 'node tests/realtimeContract.test.mjs', workdir: 'E:/private/worktree' }),
+  }));
+
+  assert.equal(call.toolKind, 'command');
+  assert.equal(call.displayDetail, 'node tests/realtimeContract.test.mjs');
+  assert.doesNotMatch(JSON.stringify(call), /private\/worktree|workdir|arguments/);
+});
+
+test('current direct apply_patch expands safe file rows with diff statistics', () => {
+  const normalizer = createNormalizer();
+  const rows = normalizer.normalizeMany(sessionItem('response_item', {
+    type: 'custom_tool_call', name: 'apply_patch', call_id: 'patch-current-direct',
+    input: '*** Begin Patch\n*** Update File: entry/src/main/ets/pages/Index.ets\n@@\n-old\n+new\n+extra\n*** Add File: tests/new.test.mjs\n+first\n+second\n*** End Patch',
+  }));
+
+  assert.deepEqual(rows.map(row => ({ fileLabel: row.fileLabel, changeKind: row.changeKind,
+    operation: row.operation, displayDetail: row.displayDetail })), [
+    { fileLabel: 'entry/src/main/ets/pages/Index.ets', changeKind: 'modified', operation: 'edit', displayDetail: '+2 -1' },
+    { fileLabel: 'tests/new.test.mjs', changeKind: 'added', operation: 'create', displayDetail: '+2 -0' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(rows), /\+old|\+new|\+first|\+second|"input"/);
 });
 
 test('collaboration wait lifecycle is never published as a generic tool row', () => {

@@ -849,6 +849,21 @@ test('real fileChange normalization reaches timeline and segments as safe presen
   assert.doesNotMatch(JSON.stringify(turn), /E:\\\\private|PRIVATE_DIFF/);
 });
 
+test('paged process activities retain safe file identity and change kind', () => {
+  const turn = buildTurnViews([
+    { type: 'turn', state: 'started', turnId: 'turn-file-process-detail' },
+    {
+      type: 'summary', summaryKind: 'tool', toolKind: 'file', id: 'file-detail-safe',
+      text: 'Edited file', fileLabel: 'entry/src/main/ets/pages/Index.ets',
+      changeKind: 'modified', displayDetail: '+2 -1',
+    },
+  ], THREAD)[0];
+
+  assert.equal(turn.process.detailActivities[0].fileLabel, 'entry/src/main/ets/pages/Index.ets');
+  assert.equal(turn.process.detailActivities[0].changeKind, 'modified');
+  assert.equal(turn.process.detailActivities[0].displayDetail, '+2 -1');
+});
+
 test('subagent projection includes only safe lifecycle name and state', () => {
   const turns = buildTurnViews([
     { type: 'turn', state: 'started', turnId: 'turn-2' },

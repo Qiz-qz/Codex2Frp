@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.10] - 2026-07-18
+
+This public backend snapshot targets the current ChatGPT/Codex Desktop message shapes while preserving the repository's independent `v1.x` version history.
+
+- Restores real privacy-safe command details from current `shell_command` events instead of generic run placeholders.
+- Projects current direct file-edit activity into repository-relative file labels, change kinds, and diff counts.
+- Preserves command and file detail across completed-task projection and cursor pagination.
+- Keeps raw arguments, output, absolute paths, credentials, and subagent message bodies private.
+- Expands the side-effect-free backend suite to 752 passing tests.
+
 ## [1.4.9] - 2026-07-18
 
 This public backend snapshot targets the current ChatGPT/Codex Desktop capability line while preserving the repository's independent `v1.x` version history.
