@@ -40,6 +40,16 @@ test('CDP-bound discovery fails closed when the controlled process has no window
   assert.equal(selected, null);
 });
 
+test('selection-only discovery can recover from a stale bound CDP process id', () => {
+  const current = { handle: 'main', processId: 111, processName: 'ChatGPT.exe', visible: true };
+  const discover = createBoundCodexWindowDiscovery({
+    getProcessId: () => 333,
+    fallbackWhenBoundMissing: true,
+  });
+
+  assert.deepEqual(discover(adapterWith([current])), current);
+});
+
 test('CDP-bound discovery uses ordinary Codex discovery only before a process is bound', () => {
   const discover = createBoundCodexWindowDiscovery({ getProcessId: () => 0 });
   const calls = [];

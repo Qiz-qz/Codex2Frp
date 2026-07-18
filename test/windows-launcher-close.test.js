@@ -117,6 +117,14 @@ test('launcher accepts an already healthy installed backend even if the pid is s
   assert.match(processBody, /Program\.IsOwnedBackendProcess\(process,\s*_paths\.ProjectRoot\)/, 'a stale pid is trusted only when it still belongs to this installed backend');
 });
 
+test('launcher does not inherit the invoking Codex task as an immutable protected task', () => {
+  const startBody = bodyAfter('private void StartServer()');
+  assert.match(startBody, /EnvironmentVariables\.Remove\("CODEX_THREAD_ID"\)/,
+    'starting Codex2Frp from Codex must not silently protect the current desktop task');
+  assert.doesNotMatch(startBody, /EnvironmentVariables\.Remove\("CODEX2FRP_PROTECTED_THREAD_IDS"\)/,
+    'the explicit administrator protection list remains supported');
+});
+
 test('silent installer never launches a control-panel window', () => {
   const parseBody = bodyAfterIn(setupSource, 'public static InstallOptions Parse(string[] args)');
   const silentBranch = parseBody.slice(parseBody.indexOf('arg.Equals("--silent"'), parseBody.indexOf('arg.Equals("--no-launch"'));

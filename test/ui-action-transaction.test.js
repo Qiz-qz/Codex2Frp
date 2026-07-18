@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createCdpBoundThreadNavigator } = require('../lib/control/cdp-bound-thread-navigation');
 const { createDesktopSelectionAdapter } = require('../lib/control/desktop-selection-adapter');
 const { createProtectedThreadGuard } = require('../lib/control/protected-thread-guard');
 const {
@@ -358,6 +359,52 @@ test('desktop selection transaction permits exact A to B navigation and restores
     status: 'confirmed', requestedThreadId: OTHER_THREAD, observedThreadId: OTHER_THREAD,
   });
   assert.equal(navigationCalls, 1);
+  assert.deepEqual(win32.targetPlacement(), originalPlacement);
+  assert.equal(win32.currentForeground(), 'editor-window');
+  assert.equal(win32.currentFocus(), 'editor-input');
+});
+
+test('CDP-unavailable native thread fallback remains bounded by the explicit transaction and restores state', async () => {
+  const originalPlacement = { showState: WINDOW_SHOW_STATES.MINIMIZED, flags: 14,
+    normalPosition: { left: 80, top: 50, right: 1280, bottom: 850 } };
+  const win32 = createWin32Adapter({ placement: originalPlacement, foreground: 'editor-window' });
+  const transaction = createTransaction(win32, {
+    resolveObservedThread: async () => TEST_THREAD,
+  });
+  const dispatches = [];
+  let now = 0;
+  const navigate = createCdpBoundThreadNavigator({
+    activateViaCdp: async () => {
+      throw Object.assign(new Error('CDP disabled'), { code: 'CODEX_CDP_REQUIRED' });
+    },
+    navigateViaDeepLink: async threadId => {
+      dispatches.push(`codex://threads/${threadId}`);
+      return {
+        method: 'codex-deep-link',
+        confirmedThreadId: threadId,
+        route: `codex://threads/${threadId}`,
+      };
+    },
+  });
+  const selection = createDesktopSelectionAdapter({
+    observeSource: async () => null,
+    navigate: ({ threadId }) => navigate(threadId),
+    transaction,
+    createIntent: createExplicitUiIntent,
+    createSourceToken: () => 'native-fallback-transaction',
+    confirmationTimeoutMs: 1,
+    confirmationPollIntervalMs: 1,
+    now: () => now,
+    sleep: async milliseconds => { now += milliseconds; },
+  });
+
+  assert.deepEqual(await selection.openDesktopThread(OTHER_THREAD), {
+    status: 'confirmed',
+    requestedThreadId: OTHER_THREAD,
+    observedThreadId: OTHER_THREAD,
+    verifiedBy: 'codex-deep-link',
+  });
+  assert.deepEqual(dispatches, [`codex://threads/${OTHER_THREAD}`]);
   assert.deepEqual(win32.targetPlacement(), originalPlacement);
   assert.equal(win32.currentForeground(), 'editor-window');
   assert.equal(win32.currentFocus(), 'editor-input');

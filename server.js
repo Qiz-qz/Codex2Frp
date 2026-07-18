@@ -104,6 +104,7 @@ const {
   normalizeHistoryPageRequest,
   pageHistorySuffix,
 } = require('./lib/history/history-pagination');
+const { readJsonlSuffix } = require('./lib/history/jsonl-suffix-reader');
 const {
   pageProcessDetailActivities,
   processDetailRevision,
@@ -577,13 +578,18 @@ const explicitWin32FocusAdapter = new Win32FocusAdapter();
 const discoverControlledCodexWindow = createBoundCodexWindowDiscovery({
   getProcessId: () => codexCdpProcessId,
 });
+const discoverSelectableCodexWindow = createBoundCodexWindowDiscovery({
+  getProcessId: () => codexCdpProcessId,
+  fallbackWhenBoundMissing: true,
+});
 const cdpBoundThreadNavigator = createCdpBoundThreadNavigator({
   activateViaCdp: threadId => activateCodexThreadViaExistingCdp(threadId),
+  navigateViaDeepLink: threadId => navigateCodexThreadViaDeepLink(threadId),
 });
 const uiActionTransaction = new UiActionTransaction({
   adapter: explicitWin32FocusAdapter,
   guard: explicitUiProtectedThreadGuard,
-  discoverWindow: discoverControlledCodexWindow,
+  discoverWindow: discoverSelectableCodexWindow,
   timeoutMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_MS || 15000),
   timeoutGraceMs: Number(process.env.CODEX2FRP_UI_ACTION_TIMEOUT_GRACE_MS || 2000),
   resolveObservedThread: resolveExplicitUiObservedThread,
@@ -617,7 +623,7 @@ function assertExplicitUiActionNotAborted(signal = explicitUiActionStorage.getSt
 }
 
 async function resolveExplicitUiObservedThread() {
-  const selection = await readCurrentCodexThreadSelection({ force: true });
+  const selection = await readCurrentCodexThreadSelection({ force: true }).catch(() => null);
   const threadId = selection && selection.threadId || '';
   if (!threadId && threadProtectionRegistry.summary().protectedCount > 0) {
     const error = new Error('The active desktop task could not be verified safely.');
@@ -1866,6 +1872,7 @@ async function handleThreads(req, res) {
   return json(res, 200, {
     ok: true,
     desktopSelectionSuppressed: sync.suppressed,
+    desktopSelectionObserved: sync.observed === true,
     ...(!sync.suppressed ? {
       selectedThreadId,
       currentThreadId: selectedThreadId,
@@ -1953,22 +1960,7 @@ function readTailLines(file) {
 }
 
 function readTailLinesWithLimit(file, maxBytes, endOffset = undefined) {
-  const stat = fs.statSync(file);
-  const end = Math.max(0, Math.min(stat.size, Number.isFinite(endOffset) ? Math.floor(endOffset) : stat.size));
-  const start = Math.max(0, end - maxBytes);
-  const fd = fs.openSync(file, 'r');
-  try {
-    const buffer = Buffer.alloc(end - start);
-    fs.readSync(fd, buffer, 0, buffer.length, start);
-    let text = buffer.toString('utf8');
-    if (start > 0) {
-      const firstNewline = text.indexOf('\n');
-      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
-    }
-    return text.split('\n').filter(Boolean);
-  } finally {
-    fs.closeSync(fd);
-  }
+  return readJsonlSuffix(file, { maxBytes, endOffset }).lines;
 }
 
 function statusTailNeedsExpansion(lines, sinceMs = 0, stat = null) {
@@ -2086,22 +2078,23 @@ function readHistoryLinesAdaptive(file, desiredMessages = MAX_HISTORY_MESSAGES, 
   const desired = Math.max(1, Number(desiredMessages) || MAX_HISTORY_MESSAGES);
 
   if (maxBytes <= CODEX_HISTORY_INITIAL_TAIL_BYTES * 6) {
-    return { lines: readTailLinesWithLimit(file, maxBytes, maxBytes), stat, scannedBytes: maxBytes, endOffset: maxBytes };
+    return readJsonlSuffix(file, { maxBytes, endOffset: maxBytes });
   }
 
   const initialBytes = Math.min(CODEX_HISTORY_INITIAL_TAIL_BYTES, maxBytes);
-  const initialLines = readTailLinesWithLimit(file, initialBytes, maxBytes);
-  if (countCodexHistoryMessages(initialLines, desired) >= desired) {
-    return { lines: initialLines, stat, scannedBytes: initialBytes, endOffset: maxBytes };
+  const initial = readJsonlSuffix(file, { maxBytes: initialBytes, endOffset: maxBytes });
+  if (countCodexHistoryMessages(initial.lines, desired) >= desired) {
+    return initial;
   }
 
-  let candidateBytes = Math.min(CODEX_HISTORY_TAIL_BYTES, maxBytes);
-  let candidateLines = readTailLinesWithLimit(file, candidateBytes, maxBytes);
-  while (candidateBytes < maxBytes && countCodexHistoryMessages(candidateLines, desired) < desired) {
-    candidateBytes = Math.min(maxBytes, candidateBytes * 2);
-    candidateLines = readTailLinesWithLimit(file, candidateBytes, maxBytes);
+  const scanLimit = Math.min(CODEX_HISTORY_TAIL_BYTES, maxBytes);
+  let candidateBytes = Math.min(CODEX_HISTORY_TAIL_BYTES, scanLimit);
+  let candidate = readJsonlSuffix(file, { maxBytes: candidateBytes, endOffset: maxBytes });
+  while (candidateBytes < scanLimit && countCodexHistoryMessages(candidate.lines, desired) < desired) {
+    candidateBytes = Math.min(scanLimit, candidateBytes * 2);
+    candidate = readJsonlSuffix(file, { maxBytes: candidateBytes, endOffset: maxBytes });
   }
-  return { lines: candidateLines, stat, scannedBytes: candidateBytes, endOffset: maxBytes };
+  return candidate;
 }
 
 function extractUserAttachments(payload) {
@@ -2532,20 +2525,33 @@ function parseCodexThreadHistory(threadId, request = {}) {
   const messagePage = pageHistorySuffix(messages, { limit: pageRequest.limit, before: cursor.messageBefore });
   const allTurns = buildTurnViews(registerHistoryEventAttachments(normalizedEvents), threadId);
   const turnPage = pageHistorySuffix(allTurns, { limit: pageRequest.limit, before: cursor.turnBefore });
-  const hasMore = messagePage.hasMore || turnPage.hasMore || historyTail.scannedBytes < cursor.endOffset;
-  const nextCursor = hasMore ? encodeHistoryCursor({
-    endOffset: cursor.endOffset,
-    messageBefore: messagePage.nextBefore,
-    turnBefore: turnPage.nextBefore,
-    fileKey: cursor.fileKey,
-    boundaryHash: cursor.boundaryHash,
-  }) : '';
+  const hasMoreInWindow = messagePage.hasMore || turnPage.hasMore;
+  const hasOlderWindow = historyTail.startOffset > 0;
+  const hasMore = hasMoreInWindow || hasOlderWindow;
+  let nextCursor = '';
+  if (hasMoreInWindow) {
+    nextCursor = encodeHistoryCursor({
+      endOffset: cursor.endOffset,
+      messageBefore: messagePage.nextBefore,
+      turnBefore: turnPage.nextBefore,
+      fileKey: cursor.fileKey,
+      boundaryHash: cursor.boundaryHash,
+    });
+  } else if (hasOlderWindow) {
+    nextCursor = encodeHistoryCursor({
+      endOffset: historyTail.startOffset,
+      messageBefore: 0,
+      turnBefore: 0,
+      fileKey: cursor.fileKey,
+      boundaryHash: historyCursorBoundaryHash(file, historyTail.startOffset),
+    });
+  }
   const history = {
     ok: true,
     available: true,
     threadId,
     sessionFile: path.basename(file),
-    truncated: historyTail.scannedBytes < cursor.endOffset,
+    truncated: hasOlderWindow,
     messages: messagePage.items,
     turns: turnPage.items,
     hasMore,
@@ -6898,8 +6904,15 @@ async function activateCodexThreadViaExistingCdp(threadId = '') {
   threadId = String(threadId).toLowerCase();
 
   await restoreCodexDesktopWindow();
-  const target = await findCodexCdpTarget({ autoOpen: false });
-  const client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
+  let target;
+  let client;
+  try {
+    target = await findCodexCdpTarget({ autoOpen: false });
+    client = await connectCdpWebSocket(target.webSocketDebuggerUrl);
+  } catch (error) {
+    error.code = error.code || 'CODEX_CDP_REQUIRED';
+    throw error;
+  }
   try {
     await client.call('Runtime.enable').catch(() => {});
     await client.call('Page.enable').catch(() => {});

@@ -26,12 +26,14 @@ test('bound thread navigation reports an exact CDP selection without using a sys
 });
 
 test('bound thread navigation fails closed when exact CDP selection cannot be confirmed', async () => {
+  let deepLinks = 0;
   const navigate = createCdpBoundThreadNavigator({
     activateViaCdp: async () => ({
       ok: false,
       code: 'CODEX_THREAD_ROW_NOT_FOUND',
       observedThreadId: '',
     }),
+    navigateViaDeepLink: async () => { deepLinks += 1; },
   });
 
   await assert.rejects(navigate(THREAD), error => {
@@ -39,4 +41,43 @@ test('bound thread navigation fails closed when exact CDP selection cannot be co
     assert.equal(error.statusCode, 409);
     return true;
   });
+  assert.equal(deepLinks, 0, 'an available CDP target that cannot confirm the task must not downgrade to a deep link');
+});
+
+test('bound thread navigation safely falls back to the native deep link only when CDP is unavailable', async () => {
+  const calls = [];
+  const navigate = createCdpBoundThreadNavigator({
+    activateViaCdp: async threadId => {
+      calls.push(['cdp', threadId]);
+      throw Object.assign(new Error('control port is not enabled'), { code: 'CODEX_CDP_REQUIRED' });
+    },
+    navigateViaDeepLink: async threadId => {
+      calls.push(['deep-link', threadId]);
+      return {
+        method: 'codex-deep-link',
+        confirmedThreadId: threadId,
+        route: `codex://threads/${threadId}`,
+      };
+    },
+  });
+
+  assert.deepEqual(await navigate(THREAD), {
+    method: 'codex-deep-link',
+    confirmedThreadId: THREAD,
+    route: `codex://threads/${THREAD}`,
+  });
+  assert.deepEqual(calls, [['cdp', THREAD], ['deep-link', THREAD]]);
+});
+
+test('bound thread navigation does not mask non-CDP action failures with a deep link', async () => {
+  let deepLinks = 0;
+  const navigate = createCdpBoundThreadNavigator({
+    activateViaCdp: async () => {
+      throw Object.assign(new Error('renderer action failed'), { code: 'CODEX_APP_ACTION_FAILED' });
+    },
+    navigateViaDeepLink: async () => { deepLinks += 1; },
+  });
+
+  await assert.rejects(navigate(THREAD), error => error.code === 'CODEX_APP_ACTION_FAILED');
+  assert.equal(deepLinks, 0);
 });

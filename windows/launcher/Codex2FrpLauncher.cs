@@ -19,7 +19,7 @@ namespace Codex2FrpLauncher
     internal static class Program
     {
         internal const string AppDisplayName = "Codex2Frp";
-        internal const string AppVersion = "1.4.13";
+        internal const string AppVersion = "1.4.15";
         internal const int ServicePort = 8988;
         internal const string ServicePortDisplay = "8988";
         internal const string DefaultSakuraDomain = "";
@@ -1966,6 +1966,10 @@ namespace Codex2FrpLauncher
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden
             };
+            // Codex launches tools with the active task in CODEX_THREAD_ID.
+            // That identity is observer context, not a request to permanently
+            // protect the task from this bridge's explicit mobile controls.
+            info.EnvironmentVariables.Remove("CODEX_THREAD_ID");
             info.EnvironmentVariables["PORT"] = Program.ServicePort.ToString();
             info.EnvironmentVariables["HOST"] = "0.0.0.0";
             info.EnvironmentVariables["MOBILE_TYPER_TOKEN"] = token;

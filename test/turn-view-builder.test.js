@@ -225,9 +225,14 @@ test('each initial or steer user message opens one stable presentation segment o
   assert.deepEqual(
     turns.map(turn => turn.timeline.filter(entry => entry.kind === 'commentary')
       .map(entry => entry.publicNarrative)),
-    [['初始说明'], ['引导一后的说明'], ['引导二后的说明']],
+    [['初始说明'], ['引导一后的说明'], ['初始说明', '引导一后的说明', '引导二后的说明']],
   );
   assert.deepEqual(turns[1].process.detailActivities.map(activity => activity.kind), ['commentary', 'shell']);
+  assert.deepEqual(turns[2].segments.map(segment => segment.kind),
+    ['commentary', 'commentary', 'command', 'commentary']);
+  assert.deepEqual(turns[2].process.detailActivities.map(activity => activity.kind),
+    ['commentary', 'commentary', 'shell', 'commentary']);
+  assert.equal(turns[2].process.detailCount, 4);
   assert.equal(turns[2].final.text, '完成');
   assert.deepEqual(turns.map(turn => turn.state), ['completed', 'completed', 'completed']);
 });

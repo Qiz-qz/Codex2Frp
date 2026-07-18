@@ -12,9 +12,13 @@ test('server binds UI transactions and thread navigation to the verified CDP pro
   assert.match(source, /createCdpBoundThreadNavigator/);
   assert.match(source, /let codexCdpProcessId\s*=\s*0/);
   assert.match(source, /discoverWindow:\s*discoverControlledCodexWindow/);
+  assert.match(source, /discoverWindow:\s*discoverSelectableCodexWindow/);
+  assert.match(source, /fallbackWhenBoundMissing:\s*true/);
+  assert.match(source, /readCurrentCodexThreadSelection\(\{ force: true \}\)\.catch\(\(\) => null\)/);
   assert.match(source, /codexCdpProcessId\s*=\s*controlledProcess\.processId/);
   assert.match(source, /reconcileCdpProcessBinding/);
   assert.match(source, /navigate:\s*async \(\{ threadId \}\) => cdpBoundThreadNavigator\(threadId\)/);
+  assert.match(source, /navigateViaDeepLink:\s*threadId\s*=>\s*navigateCodexThreadViaDeepLink\(threadId\)/);
   assert.doesNotMatch(source, /navigate:\s*async \(\{ threadId \}\) => \{\s*return navigateCodexThreadViaDeepLink/);
 });
 

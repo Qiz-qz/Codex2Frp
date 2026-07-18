@@ -9,6 +9,7 @@ const {
   pageProcessDetailActivities,
   processDetailRevision,
 } = require('../lib/history/process-detail-pagination');
+const { buildTurnViews } = require('../lib/events/turn-view-builder');
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 
@@ -134,6 +135,40 @@ test('completed history summary removes duplicate timeline payload while preserv
   assert.deepEqual(summary.process.counts, { shell: 53, image: 27 });
   assert.match(summary.process.detailRevision, /^[a-f0-9]{64}$/);
   assert.ok(summaryBytes < fullBytes * 0.25, `summary ${summaryBytes} B should be <25% of full ${fullBytes} B`);
+});
+
+test('latest guided presentation owns the complete ordered process detail before summary paging', () => {
+  const turnId = 'turn-guided-detail';
+  const turns = buildTurnViews([
+    { type: 'message', role: 'user', text: '原始任务', delivery: 'initial', eventId: 'user-original' },
+    { type: 'turn', state: 'started', turnId, eventId: 'turn-start' },
+    { type: 'summary', summaryKind: 'commentary', text: '正在处理请求', body: '先检查环境',
+      turnId, eventId: 'commentary-original' },
+    { type: 'message', role: 'user', text: '补充引导', delivery: 'steer', turnId,
+      eventId: 'user-guide' },
+    { type: 'summary', summaryKind: 'tool', toolKind: 'command', text: '已运行命令',
+      displayDetail: 'npm test', turnId, eventId: 'command-guide' },
+    { type: 'summary', summaryKind: 'commentary', text: '正在处理请求', body: '命令完成后继续核对',
+      turnId, eventId: 'commentary-guide' },
+    { type: 'turn', state: 'completed', turnId, eventId: 'turn-complete' },
+  ], 'thread-guided-detail');
+  const owner = turns[turns.length - 1];
+  const summarize = completedTurnSummarizer();
+  const summary = summarize(owner);
+  const first = pageProcessDetailActivities(owner.process, {
+    limit: 2, revision: summary.process.detailRevision,
+  });
+  const second = pageProcessDetailActivities(owner.process, {
+    limit: 2, cursor: first.nextCursor, revision: summary.process.detailRevision,
+  });
+
+  assert.equal(owner.presentationId, 'user-guide');
+  assert.deepEqual(owner.timeline.map(entry => entry.kind), ['commentary', 'command', 'commentary']);
+  assert.deepEqual(owner.segments.map(segment => segment.kind), ['commentary', 'command', 'commentary']);
+  assert.deepEqual(first.items.concat(second.items).map(activity => activity.kind),
+    ['commentary', 'shell', 'commentary']);
+  assert.equal(summary.process.detailCount, 3);
+  assert.equal(second.hasMore, false);
 });
 
 test('history process detail endpoint is read-only, token-protected, and capability-only for images', () => {

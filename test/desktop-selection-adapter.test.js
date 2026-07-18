@@ -160,6 +160,30 @@ test('native Codex deep-link dispatch confirms when optional CDP observation is 
   });
 });
 
+test('native Codex deep-link dispatch confirms when optional CDP observation throws', async () => {
+  const adapter = createDesktopSelectionAdapter({
+    observeSource: async () => { throw new TypeError('fetch failed'); },
+    navigate: async ({ threadId }) => ({
+      method: 'codex-deep-link',
+      confirmedThreadId: threadId,
+    }),
+    transaction: { run: async (_context, operation) => operation({}) },
+    createIntent: ({ action, threadId }) => ({ action, threadId }),
+    createSourceToken: () => 'deep-link-throw-token',
+    sleep: async () => {},
+    now: (() => { let value = 0; return () => value += 10; })(),
+    confirmationTimeoutMs: 20,
+    confirmationPollIntervalMs: 10,
+  });
+
+  assert.deepEqual(await adapter.openDesktopThread(THREAD), {
+    status: 'confirmed',
+    requestedThreadId: THREAD,
+    observedThreadId: THREAD,
+    verifiedBy: 'codex-deep-link',
+  });
+});
+
 test('native deep-link never overrides a conflicting exact CDP observation', async () => {
   const adapter = createDesktopSelectionAdapter({
     observeSource: async () => ({ route: `app://-/index.html#/threads/${OTHER_THREAD}` }),
@@ -239,6 +263,7 @@ test('production sync consumes phone-origin suppression and publishes later desk
   assert.deepEqual(await consumeDesktopSelectionForSync(adapter), {
     selection: null,
     suppressed: true,
+    observed: true,
     reason: 'phone_origin',
   });
   const next = await consumeDesktopSelectionForSync(adapter);
@@ -247,4 +272,18 @@ test('production sync consumes phone-origin suppression and publishes later desk
   const desktopSwitch = await consumeDesktopSelectionForSync(adapter);
   assert.equal(desktopSwitch.suppressed, false);
   assert.equal(desktopSwitch.selection.threadId, OTHER_THREAD);
+});
+
+test('production sync distinguishes an observed desktop home from an unavailable observer', async () => {
+  const unavailable = createDesktopSelectionAdapter({ observeSource: async () => null });
+  assert.deepEqual(await consumeDesktopSelectionForSync(unavailable), {
+    selection: null, suppressed: false, observed: false, reason: 'selection_absent',
+  });
+
+  const home = createDesktopSelectionAdapter({
+    observeSource: async () => ({ route: 'app://-/index.html#/' }),
+  });
+  assert.deepEqual(await consumeDesktopSelectionForSync(home), {
+    selection: null, suppressed: false, observed: true, reason: 'selection_absent',
+  });
 });

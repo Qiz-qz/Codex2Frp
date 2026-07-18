@@ -1,0 +1,7 @@
+Codex2Frp public backend release: 1.4.15
+Internal capability mapping: 2.4.15
+Built: 2026-07-18
+Installer: Codex2FrpSetup-v1.4.15.exe
+Installer SHA-256: B347CFD16DB2650AC6F55B37C8AAB06A4E4FBBFCD07A4E33B32614621F39A312
+Backend gate: PASS (773 unit tests; 7 integration tests passed, 4 opt-in isolated live tests skipped)
+Release scope: backend only; no CodexHM HAP, APP, source, signing material, or private task data.

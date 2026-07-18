@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.15] - 2026-07-18
+
+- Prevents the Windows launcher from inheriting `CODEX_THREAD_ID` as an immutable mobile-control restriction.
+- Merges every privacy-safe process narrative and action from guided turns before history paging and detail caching, preserving desktop-visible order in completed process sheets.
+- Reads very large JSONL task histories in bounded UTF-8 chunks with stable backward cursors instead of loading the entire file.
+- Allows an explicit phone-initiated task switch to use the native `codex://threads/<uuid>` route when CDP is unavailable, while restoring the original focus, placement, and minimized state.
+- Keeps the public DTO boundary strict: no local paths, private reasoning payloads, user bodies, or subagent message content are exposed.
+
+This public backend release corresponds to internal Codex2Frp 2.4.15 and remains backend-only.
+
 ## [1.4.13] - 2026-07-18
 
 - Preserves the complete privacy-safe visible timeline for completed process details, including narrative, images, commands, file edits and subagent lifecycle rows in desktop order.
