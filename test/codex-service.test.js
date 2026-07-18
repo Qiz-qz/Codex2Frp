@@ -460,6 +460,12 @@ test('error classification is stable for compatibility, guard, RPC, and uncertai
       details: { rpcError: { code: -32600, message: 'thread is not materialized yet' } },
     },
   );
+  const desktopTimeout = Object.assign(new Error('desktop response timeout'), {
+    code: 'DESKTOP_RPC_TIMEOUT',
+  });
+  const desktopUnavailable = Object.assign(new Error('desktop bridge unavailable'), {
+    code: 'DESKTOP_INTERNAL_RPC_UNAVAILABLE',
+  });
 
   assert.deepEqual(classifyCodexServiceError(methodMissing), {
     kind: ERROR_KINDS.UNAVAILABLE,
@@ -502,5 +508,19 @@ test('error classification is stable for compatibility, guard, RPC, and uncertai
     rpcCode: -32600,
     retryable: false,
     uncertain: false,
+  });
+  assert.deepEqual(classifyCodexServiceError(desktopTimeout, { mutation: true }), {
+    kind: ERROR_KINDS.UNCERTAIN,
+    code: 'DESKTOP_RPC_TIMEOUT',
+    rpcCode: null,
+    retryable: false,
+    uncertain: true,
+  });
+  assert.deepEqual(classifyCodexServiceError(desktopUnavailable, { mutation: true }), {
+    kind: ERROR_KINDS.UNCERTAIN,
+    code: 'DESKTOP_INTERNAL_RPC_UNAVAILABLE',
+    rpcCode: null,
+    retryable: false,
+    uncertain: true,
   });
 });

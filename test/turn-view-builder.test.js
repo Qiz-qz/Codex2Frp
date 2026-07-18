@@ -588,10 +588,14 @@ test('desktop command details and safe tool tokens agree across snapshot, histor
       type: 'commandExecution', id: 'command-c', status: 'completed', command: 'node --test focused.test.js',
       internal_chat_message_metadata_passthrough: { turn_id: turnId },
     } },
-    { type: 'response_item', _stableOrder: 6, payload: {
-      type: 'mcpToolCall', id: 'mcp-safe', status: 'completed', server: 'browser', tool: 'open',
-      arguments: { secret: 'PRIVATE_MCP_ARGUMENT' }, result: { content: 'PRIVATE_MCP_RESULT' },
-      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    { type: 'event_msg', _stableOrder: 6, payload: {
+      type: 'mcp_tool_call_end', call_id: 'mcp-safe',
+      invocation: { server: 'browser', tool: 'open', arguments: {
+        title: 'MCP', secret: 'PRIVATE_MCP_ARGUMENT',
+      } },
+      result: { Ok: { content: 'PRIVATE_MCP_RESULT', _meta: {
+        'codex/toolSurface': { kind: 'computerUse', app: 'PRIVATE_APP_PATH' },
+      } } },
     } },
     { type: 'response_item', _stableOrder: 7, payload: {
       type: 'dynamicToolCall', id: 'dynamic-safe', status: 'completed', namespace: 'public.tools', tool: 'inspect',
@@ -613,7 +617,8 @@ test('desktop command details and safe tool tokens agree across snapshot, histor
   ]);
   const mcpEvent = snapshot.events.find(event => event.toolKind === 'mcp');
   const dynamicEvent = snapshot.events.find(event => event.toolKind === 'dynamicTool');
-  assert.deepEqual({ server: mcpEvent.server, tool: mcpEvent.tool }, { server: 'browser', tool: 'open' });
+  assert.deepEqual({ server: mcpEvent.server, tool: mcpEvent.tool, surfaceKind: mcpEvent.surfaceKind },
+    { server: 'browser', tool: 'open', surfaceKind: 'computerUse' });
   assert.deepEqual({ namespace: dynamicEvent.namespace, tool: dynamicEvent.tool },
     { namespace: 'public.tools', tool: 'inspect' });
 
@@ -623,6 +628,10 @@ test('desktop command details and safe tool tokens agree across snapshot, histor
   ]);
   assert.deepEqual(turn.timeline.filter(entry => entry.kind === 'command').map(entry => entry.displayDetail),
     commandEvents.map(event => event.displayDetail));
+  assert.equal(turn.timeline.find(entry => entry.kind === 'mcp').surfaceKind, 'computerUse');
+  assert.equal(turn.segments.find(segment => segment.kind === 'mcp').items[0].surfaceKind, 'computerUse');
+  assert.equal(turn.process.activities.find(activity => activity.kind === 'mcp').surfaceKind, 'computerUse');
+  assert.equal(JSON.stringify(turn).includes('PRIVATE_APP_PATH'), false);
   assert.deepEqual({ exitCode: turn.timeline[0].exitCode, background: turn.timeline[0].background },
     { exitCode: 0, background: false });
   assert.deepEqual(turn.segments.filter(segment => segment.kind === 'command')

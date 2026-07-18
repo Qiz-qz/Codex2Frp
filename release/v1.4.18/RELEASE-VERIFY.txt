@@ -1,0 +1,12 @@
+Codex2Frp public release: 1.4.18
+Internal backend capability line: 2.4.18
+Built: 2026-07-19
+
+Verification:
+- Backend unit tests: 774/774 passed.
+- Default integration tests: 7 passed; 4 opt-in isolated live tests skipped by contract.
+- Public DTO tests confirm computer-use identity without private app names, raw arguments, tool results or local paths.
+- Release contains only the Codex2Frp backend installer and verification files; no CodexHM source or package is included.
+
+SHA-256:
+C1BBC1DF4323A66C7F2C8B18DB33CCC8161451247D501BAA590D568CC1E541DF  Codex2FrpSetup-v1.4.18.exe

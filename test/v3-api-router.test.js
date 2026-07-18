@@ -659,13 +659,6 @@ test('thread-input keeps steer and enqueue semantics explicit and steers only th
   const queue = new TurnInputQueue({ createId: () => 'queue-steer-test' });
   const queueCommandCoordinator = new SpyQueueCoordinator();
   const { router, service } = createRouter({ queue, queueCommandCoordinator });
-  service.results.set('readThread', {
-    thread: {
-      id: THREAD,
-      status: { type: 'active' },
-      turns: [{ id: 'turn-active', status: 'inProgress', kind: 'regular' }],
-    },
-  });
   service.results.set('steerTurn', { turnId: 'turn-active' });
 
   const steered = await router.handle({
@@ -696,8 +689,8 @@ test('thread-input keeps steer and enqueue semantics explicit and steers only th
   assert.equal(queued.statusCode, 202);
   assert.equal(queued.body.state, 'queued');
   assert.equal(queued.body.item.state, 'queued');
-  assert.deepEqual(service.calls.map(call => call.method), ['readThread', 'steerTurn']);
-  assert.deepEqual(service.calls[1], {
+  assert.deepEqual(service.calls.map(call => call.method), ['steerTurn']);
+  assert.deepEqual(service.calls[0], {
     method: 'steerTurn',
     params: {
       threadId: THREAD,
@@ -719,13 +712,6 @@ test('thread-input archives data URLs before persistence and materializes images
   const queueCommandCoordinator = new SpyQueueCoordinator();
   const attachmentStore = createAttachmentStore(t);
   const { router, service } = createRouter({ queue, queueCommandCoordinator, attachmentStore });
-  service.results.set('readThread', {
-    thread: {
-      id: THREAD,
-      status: { type: 'active' },
-      turns: [{ id: 'turn-active', status: 'inProgress', kind: 'regular' }],
-    },
-  });
   service.results.set('steerTurn', { turnId: 'turn-active' });
 
   const response = await router.handle({
@@ -1003,6 +989,32 @@ test('queue CRUD, flush, and reconcile are guarded and flush starts turns throug
   ]);
 });
 
+test('desktop timeouts distinguish safe reads from uncertain steer delivery', async () => {
+  const queue = new TurnInputQueue({ createId: () => 'queue-timeout-test' });
+  const { router, service } = createRouter({ queue, queueCommandCoordinator: new SpyQueueCoordinator() });
+  const timeout = () => Object.assign(new Error('desktop response timeout'), {
+    code: 'DESKTOP_RPC_TIMEOUT',
+    statusCode: 503,
+  });
+
+  service.results.set('readThread', timeout());
+  const readFailure = await router.handle({
+    method: 'GET',
+    url: `/codex/v3/threads/${THREAD}/status`,
+  });
+  assert.equal(readFailure.body.error.retryable, true);
+  assert.equal(readFailure.body.error.uncertain, false);
+
+  service.results.set('steerTurn', timeout());
+  const steerFailure = await router.handle({
+    method: 'POST',
+    url: '/codex/v3/thread-input',
+    body: { mode: 'steer-current', threadId: THREAD, expectedTurnId: 'turn-active', text: 'guide' },
+  });
+  assert.equal(steerFailure.body.error.retryable, false);
+  assert.equal(steerFailure.body.error.uncertain, true);
+});
+
 test('pending request listing synchronizes the desktop renderer before returning', async () => {
   const pendingRequestStore = createPendingRequestStore();
   let synchronizedThreadId = '';
@@ -1272,13 +1284,6 @@ test('queue convert-to-steer is atomic and uses the exact active turn', async ()
   const queueCommandCoordinator = new SpyQueueCoordinator();
   const { router, service } = createRouter({ queue, queueCommandCoordinator });
   const item = queue.enqueue({ threadId: THREAD, clientRequestId: 'convert-request', text: 'use this now' });
-  service.results.set('readThread', {
-    thread: {
-      id: THREAD,
-      status: { type: 'active' },
-      turns: [{ id: 'turn-active', status: 'inProgress', kind: 'regular' }],
-    },
-  });
   service.results.set('steerTurn', { turnId: 'turn-active' });
 
   const response = await router.handle({
@@ -1289,7 +1294,7 @@ test('queue convert-to-steer is atomic and uses the exact active turn', async ()
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.item.state, 'cancelled');
   assert.deepEqual(queue.list(THREAD), []);
-  assert.deepEqual(service.calls.map(call => call.method), ['readThread', 'steerTurn']);
-  assert.equal(service.calls[1].params.expectedTurnId, 'turn-active');
+  assert.deepEqual(service.calls.map(call => call.method), ['steerTurn']);
+  assert.equal(service.calls[0].params.expectedTurnId, 'turn-active');
   assert.equal(queueCommandCoordinator.contexts.at(-1).action, 'queue.steer');
 });

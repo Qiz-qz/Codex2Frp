@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.18] - 2026-07-19
+
+- Projects current ChatGPT computer-use activities as a dedicated privacy-safe surface kind, so mobile clients can display their desktop-equivalent identity instead of a generic Node.js tool row.
+- Keeps computer-use app names, raw arguments, tool results, local paths and other private metadata outside the public DTO.
+- Makes same-turn guidance atomic across request acknowledgement and queue state, preventing accepted guidance from being reported as unapplied during an active task.
+- Preserves authoritative user/progress turn identity so mobile waiting-response shells can disappear as soon as real desktop progress begins.
+
+This public backend release corresponds to internal Codex2Frp 2.4.18 and remains backend-only.
+
 ## [1.4.15] - 2026-07-18
 
 - Prevents the Windows launcher from inheriting `CODEX_THREAD_ID` as an immutable mobile-control restriction.

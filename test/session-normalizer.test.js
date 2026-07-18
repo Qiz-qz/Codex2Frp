@@ -111,7 +111,9 @@ test('current desktop MCP web and automatic compaction events use semantic visib
       server: 'node_repl', tool: 'js',
       arguments: { title: '截取桌面端当前任务', code: 'PRIVATE_CODE', token: 'PRIVATE_TOKEN' },
     },
-    result: { content: 'PRIVATE_RESULT' },
+    result: { Ok: { content: 'PRIVATE_RESULT', _meta: { 'codex/toolSurface': {
+      kind: 'computerUse', app: { appId: 'process:C:\\Tool.exe', kind: 'appId' },
+    } } } },
     duration: { secs: 2, nanos: 500000000 },
   } });
   const web = normalizer.normalize({ type: 'event_msg', payload: {
@@ -123,8 +125,8 @@ test('current desktop MCP web and automatic compaction events use semantic visib
   } });
 
   assert.deepEqual({ text: mcp.text, toolKind: mcp.toolKind, server: mcp.server, tool: mcp.tool,
-    durationMs: mcp.durationMs }, {
-    text: '截取桌面端当前任务', toolKind: 'mcp', server: 'node_repl', tool: 'js', durationMs: 2500,
+    surfaceKind: mcp.surfaceKind, durationMs: mcp.durationMs }, {
+    text: '截取桌面端当前任务', toolKind: 'mcp', server: 'node_repl', tool: 'js', surfaceKind: 'computerUse', durationMs: 2500,
   });
   assert.deepEqual({ text: web.text, toolKind: web.toolKind, displayDetail: web.displayDetail }, {
     text: '已搜索网页', toolKind: 'search', displayDetail: 'site:example.test current schema',

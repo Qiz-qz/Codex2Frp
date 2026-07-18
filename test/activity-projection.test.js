@@ -211,7 +211,7 @@ test('activity projection exposes only structured safe execution metadata and no
   appendProjectedActivity(process, {
     id: 'metadata', kind: 'mcp', state: 'succeeded', title: 'MCP', operation: 'openPage',
     server: 'browser', tool: 'open', namespace: 'public.tools', durationMs: 1250,
-    exitCode: 0, background: true, sourceOrdinal: 9,
+    exitCode: 0, background: true, sourceOrdinal: 9, surfaceKind: 'computerUse',
     body: 'BODY_SECRET', arguments: 'ARG_SECRET', output: 'OUT_SECRET', payload: 'PAYLOAD_SECRET',
   });
   appendProjectedActivity(process, {
@@ -221,7 +221,8 @@ test('activity projection exposes only structured safe execution metadata and no
   });
   assert.deepEqual(process.detailActivities[0], {
     id: 'metadata', kind: 'mcp', state: 'succeeded', title: 'MCP', operation: 'openPage',
-    server: 'browser', tool: 'open', namespace: 'public.tools', durationMs: 1250, exitCode: 0, background: true, sourceOrdinal: 9,
+    server: 'browser', tool: 'open', namespace: 'public.tools', durationMs: 1250, exitCode: 0, background: true,
+    sourceOrdinal: 9, surfaceKind: 'computerUse',
   });
   assert.deepEqual(process.detailActivities[1], {
     id: 'subagent', kind: 'subagent', state: 'running', title: 'worker',
