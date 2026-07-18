@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.11] - 2026-07-18
+
+This public backend snapshot adapts explicit desktop control and image history to the current ChatGPT/Codex Desktop runtime while preserving the repository's independent `v1.x` history.
+
+- Resolves the renderer CDP websocket against the address family that actually accepted the endpoint, including current IPv6 loopback listeners, so model, reasoning, speed, task selection, and other explicit controls reach the verified desktop window.
+- Coalesces named user-image envelopes with their materialized capability representations by stable image order, preventing duplicate phone attachments without merging genuinely different images.
+- Keeps next-turn model, reasoning, and speed settings scoped to the exact composer request instead of leaking stale defaults into a queued message.
+- Expands the side-effect-free backend suite to 757 passing tests.
+
 ## [1.4.10] - 2026-07-18
 
 This public backend snapshot targets the current ChatGPT/Codex Desktop message shapes while preserving the repository's independent `v1.x` version history.

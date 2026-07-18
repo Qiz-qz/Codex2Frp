@@ -32,6 +32,10 @@ const {
 const modelOptionUtils = require('./lib/model-options');
 const { isAuthorizedRequest } = require('./lib/security/auth');
 const { selectCodexCdpTarget } = require('./lib/windows/cdp-target');
+const {
+  bindCdpTargetToProbeEndpoint,
+  normalizeCdpProbeHost,
+} = require('./lib/windows/cdp-endpoint');
 const { createBoundCodexWindowDiscovery } = require('./lib/windows/cdp-bound-window-discovery');
 const { reconcileCdpProcessBinding } = require('./lib/windows/cdp-process-binding');
 const { resolveNextTurnSettings } = require('./lib/windows/composer-next-turn-settings');
@@ -257,6 +261,7 @@ let keepAwakeStartedAt = '';
 let codexCdpLaunchPromise = null;
 let codexCdpLastLaunch = { ok: false, at: 0, detail: '' };
 let codexCdpPort = CODEX_CDP_PREFERRED_PORT;
+let codexCdpHost = normalizeCdpProbeHost(CODEX_CDP_HOST) || '127.0.0.1';
 let codexCdpProcessId = 0;
 let v3QueueDispatchTimer = null;
 const v3QueueDispatchingThreads = new Set();
@@ -4308,7 +4313,7 @@ Get-CimInstance Win32_Process -Filter "name = 'ChatGPT.exe' OR name = 'Codex.exe
 }
 
 async function probeCodexCdpTarget(timeoutMs = 1200) {
-  const hosts = [CODEX_CDP_HOST, '127.0.0.1', '[::1]', 'localhost']
+  const hosts = [codexCdpHost, CODEX_CDP_HOST, '127.0.0.1', '[::1]', 'localhost']
     .map(cdpHostForUrl)
     .filter((item, index, list) => item && list.indexOf(item) === index);
   let lastError = null;
@@ -4320,7 +4325,11 @@ async function probeCodexCdpTarget(timeoutMs = 1200) {
         const target = selectCodexCdpTarget(pages);
         if (target) {
           codexCdpPort = port;
-          return target;
+          codexCdpHost = normalizeCdpProbeHost(host) || codexCdpHost;
+          return bindCdpTargetToProbeEndpoint(target, {
+            host: codexCdpHost,
+            port: codexCdpPort,
+          });
         }
       } catch (error) {
         lastError = error;
@@ -4499,7 +4508,7 @@ async function ensureCodexCdpReady(options = {}) {
       launched: false,
       target,
       port: codexCdpPort,
-      host: CODEX_CDP_HOST,
+      host: codexCdpHost,
       lastLaunch: codexCdpLastLaunch,
     };
   } catch (initialError) {
@@ -4525,7 +4534,7 @@ async function ensureCodexCdpReady(options = {}) {
     launch,
     target,
     port: codexCdpPort,
-    host: CODEX_CDP_HOST,
+    host: codexCdpHost,
     lastLaunch: codexCdpLastLaunch,
   };
 }
@@ -8876,7 +8885,7 @@ async function handleClientConfig(req, res) {
       status: sakura,
     },
     controlPort: {
-      host: CODEX_CDP_HOST,
+      host: codexCdpHost,
       port: codexCdpPort,
       ready: nextTurnSettings.available === true || Boolean(confirmedModel || confirmedReasoning || confirmedSpeed),
       autoOpen: false,
@@ -9351,6 +9360,11 @@ async function runExplicitProcessControlHttpAction(req, res) {
 
   const requestedThreadId = typeof payload.threadId === 'string' ? payload.threadId.trim() : '';
   const threadId = requestedThreadId || 'desktop-control';
+  // Resolve the reachable IPv4/IPv6 CDP endpoint before correlating its owner.
+  // The installed ChatGPT build can listen only on ::1 while advertising a
+  // 127.0.0.1 debugger URL, and the active port may differ from the configured
+  // preference. This probe is passive and happens before any window action.
+  await probeCodexCdpTarget(CODEX_CDP_PASSIVE_SEND_TIMEOUT_MS).catch(() => null);
   const cdpProcesses = await findRunningCodexCdpPorts({ includeProcessIds: true }).catch(() => []);
   const boundWindows = codexCdpProcessId > 0
     ? explicitWin32FocusAdapter.listTopLevelWindows({ processId: codexCdpProcessId })

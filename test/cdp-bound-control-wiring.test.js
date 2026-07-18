@@ -17,3 +17,15 @@ test('server binds UI transactions and thread navigation to the verified CDP pro
   assert.match(source, /navigate:\s*async \(\{ threadId \}\) => cdpBoundThreadNavigator\(threadId\)/);
   assert.doesNotMatch(source, /navigate:\s*async \(\{ threadId \}\) => \{\s*return navigateCodexThreadViaDeepLink/);
 });
+
+test('control enable resolves the reachable dual-stack CDP target before binding its window owner', () => {
+  assert.match(source, /let codexCdpHost\s*=\s*normalizeCdpProbeHost/);
+  assert.match(source, /bindCdpTargetToProbeEndpoint/);
+  const handlerStart = source.indexOf('async function runExplicitProcessControlHttpAction');
+  const probe = source.indexOf('await probeCodexCdpTarget', handlerStart);
+  const processScan = source.indexOf('await findRunningCodexCdpPorts', handlerStart);
+  const reconciliation = source.indexOf('reconcileCdpProcessBinding', handlerStart);
+  assert.ok(handlerStart >= 0 && probe > handlerStart);
+  assert.ok(processScan > probe, 'process correlation uses the port selected by the reachable target probe');
+  assert.ok(reconciliation > processScan, 'window binding follows target and process correlation');
+});

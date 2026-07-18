@@ -145,6 +145,16 @@ test('reasoning selection recognizes current desktop Light labels', () => {
   assert.equal(reasoningKey('轻度'), 'low');
 });
 
+test('current desktop speed attributes preserve fast capability in the exact composer sample', () => {
+  const result = resolveNextTurnSettings(exactSample(THREAD_A, {
+    speedSelected: 'priority',
+  }), { requestedThreadId: THREAD_A, catalogOptions: CATALOG, observedAt: OBSERVED_AT });
+
+  assert.equal(result.available, true);
+  assert.equal(result.speed.key, 'fast');
+  assert.equal(result.speed.serviceTier, 'priority');
+});
+
 test('hidden measurement candidates in trigger text cannot override the one visible model and effort label', () => {
   const result = resolveNextTurnSettings(exactSample(THREAD_A, {
     text: 'GPT-5.3-Codex-Spark 高 GPT-5.6-Sol 极高 GPT-5.6-Pro 中',

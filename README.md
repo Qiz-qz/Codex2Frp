@@ -2,7 +2,7 @@
 
 Codex2Frp is a Windows backend bridge for controlling an existing Codex Desktop session from a phone or browser. It exposes a local HTTP API, a browser console, a Windows control panel, and optional remote-link access for off-LAN use.
 
-Current version: `v1.4.10`.
+Current version: `v1.4.11`.
 
 This public release corresponds to the backend capability line for the current ChatGPT/Codex Desktop while retaining the repository's independent `v1.x` public version history.
 
@@ -28,7 +28,7 @@ scripts/                     Windows runtime and build scripts
 test/                        Node test suite
 windows/launcher/            Windows control panel source
 windows/installer/           Windows installer source
-release/v1.4.10/             Latest public installer release
+release/v1.4.11/             Latest public installer release
 server.js                    Backend HTTP server
 ```
 
@@ -37,25 +37,25 @@ server.js                    Backend HTTP server
 Download the latest installer from this repository:
 
 ```text
-release/v1.4.10/Codex2FrpSetup-v1.4.10.exe
+release/v1.4.11/Codex2FrpSetup-v1.4.11.exe
 ```
 
 Verify the installer with:
 
 ```text
-release/v1.4.10/SHA256SUMS.txt
+release/v1.4.11/SHA256SUMS.txt
 ```
 
 The current SHA-256 is recorded in:
 
 ```text
-release/v1.4.10/SHA256SUMS.txt
+release/v1.4.11/SHA256SUMS.txt
 ```
 
 The installer can be run graphically, or silently:
 
 ```powershell
-Codex2FrpSetup-v1.4.10.exe --silent --install-dir E:\Codex2Frp
+Codex2FrpSetup-v1.4.11.exe --silent --install-dir E:\Codex2Frp
 ```
 
 ## Run
@@ -197,6 +197,13 @@ and update `SHA256SUMS.txt`.
 - Keep Codex control enabled only on a trusted desktop session.
 
 ## Release Notes
+
+### v1.4.11
+
+- Resolves current ChatGPT/Codex Desktop CDP websocket endpoints against the address family that actually accepted the connection, restoring verified model, reasoning, speed, task-selection, and related explicit controls on IPv6-loopback installations.
+- Deduplicates named user images against their materialized capability representations while preserving separate images that only share a filename.
+- Keeps queued next-turn model, reasoning, and speed settings bound to the exact request rather than stale composer state.
+- Expands the side-effect-free backend suite to 757 passing tests.
 
 ### v1.4.10
 

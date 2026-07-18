@@ -1,0 +1,19 @@
+Codex2Frp public release 1.4.11
+Built: 2026-07-18
+
+Artifact:
+- Codex2FrpSetup-v1.4.11.exe
+- Size: 2052096 bytes
+- SHA-256: 6A84AD914AE453AC6B5D011223C52CB8D4E2DA0F39A68B9EDC8A01E812EF86A7
+
+Verification:
+- Public backend gate: 757/757 unit tests passed.
+- JavaScript syntax check passed.
+- Integration gate: 6 passed, 4 opt-in isolated live app-server checks skipped.
+- Windows installer built from the public 1.4.11 source tree.
+- Dual-stack CDP endpoint, explicit control wiring, queued settings, and user-image deduplication regressions passed.
+- Feature-equivalent internal 2.4.11 runtime was installed at E:\Codex2Frp and returned ok=true from the authenticated /codex/health endpoint on port 8988.
+
+Publication boundary:
+- This release contains backend installer and verification files only.
+- No CodexHM, HAP, APP, signing material, runtime data, tokens, logs, or private paths are included.

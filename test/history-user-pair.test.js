@@ -2,7 +2,27 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mergeAdjacentUserHistoryMessage } = require('../lib/events/history-user-pair');
+const {
+  mergeAdjacentUserHistoryMessage,
+  mergeUserHistoryAttachments,
+} = require('../lib/events/history-user-pair');
+
+test('wrapper image names coalesce with materialized inline image sources without duplicating user attachments', () => {
+  const merged = mergeUserHistoryAttachments(
+    ['signing', '2826c8794aa254ed53e749673fa8ad5f.jpg', '665122cd826a97d53879a3c5e59fe8d8.jpg'],
+    [
+      { name: 'image-a1b2c3d4.jpg', filePath: 'C:/private/cache/a1b2c3d4.jpg', mime: 'image/jpeg' },
+      { name: 'image-e5f6a7b8.jpg', filePath: 'C:/private/cache/e5f6a7b8.jpg', mime: 'image/jpeg' },
+    ],
+  );
+
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0], 'signing');
+  assert.equal(merged[1].name, '2826c8794aa254ed53e749673fa8ad5f.jpg');
+  assert.equal(merged[2].name, '665122cd826a97d53879a3c5e59fe8d8.jpg');
+  assert.equal(merged[1].filePath, 'C:/private/cache/a1b2c3d4.jpg');
+  assert.equal(merged[2].filePath, 'C:/private/cache/e5f6a7b8.jpg');
+});
 
 test('legacy history merges complementary desktop user representations despite different attachment counts', () => {
   const previous = {
