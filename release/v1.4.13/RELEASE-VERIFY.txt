@@ -1,0 +1,12 @@
+Codex2Frp public backend release: 1.4.13
+Internal capability mapping: 2.4.13
+Built: 2026-07-18
+Installer: Codex2FrpSetup-v1.4.13.exe
+Installer SHA-256: 850507C673412710145C055C049EA5FACD28647B9B7513E73CC5303A44297684
+Backend gate: PASS (761/761 unit tests)
+Integration gate: PASS (7 passed; 4 explicit isolated live app-server tests skipped by design)
+Syntax check: PASS
+Completed process timeline/detail cache tests: PASS
+Persistent multi-client foreground notification cursor tests: PASS
+Privacy boundary: PASS (no local path, raw event, user/final body or subagent message persistence)
+Repository scope: backend only; no CodexHM source, HAP or APP included.

@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.13] - 2026-07-18
+
+- Preserves the complete privacy-safe visible timeline for completed process details, including narrative, images, commands, file edits and subagent lifecycle rows in desktop order.
+- Keeps raw paged command/file activity available as a secondary process-detail source while allowing mobile clients to render the desktop-equivalent timeline first.
+- Replaces the consuming foreground-notice snapshot with a bounded persistent event ring and independent per-client cursors, so background task start/completion notifications survive reconnects and backend restarts.
+- Persists only strict notification metadata and enriches process images through opaque capability URLs; local paths, user bodies, final text, raw events and subagent content remain private.
+- Retains current ChatGPT/Codex Desktop control, dual-stack CDP discovery, task protection, queue/steer and focus-restoration behavior.
+
+This public backend release corresponds to internal Codex2Frp 2.4.13 and remains backend-only.
+
 ## [1.4.11] - 2026-07-18
 
 This public backend snapshot adapts explicit desktop control and image history to the current ChatGPT/Codex Desktop runtime while preserving the repository's independent `v1.x` history.

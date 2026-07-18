@@ -24,6 +24,7 @@ const {
   createForegroundNoticeForStatus,
   createForegroundNoticesForThreadSnapshots,
 } = require('./lib/foreground-notice');
+const { ForegroundNoticeStore } = require('./lib/foreground-notice-store');
 const {
   classifyThreadProject,
   isSubagentSessionMeta,
@@ -143,6 +144,7 @@ const TURN_INPUT_QUEUE_FILE = path.join(STATE_DIR, 'turn-input-queue.json');
 const ATTACHMENT_STORE_DIR = path.join(STATE_DIR, 'attachments');
 const HISTORY_ATTACHMENT_CACHE_DIR = path.join(STATE_DIR, 'history-attachments');
 const PROTECTED_THREADS_FILE = path.join(STATE_DIR, 'protected-threads.json');
+const FOREGROUND_NOTICE_STORE_FILE = path.join(STATE_DIR, 'foreground-notices.json');
 let sakuraRouteCache = { at: 0, result: null };
 const inlineAttachmentCache = new Map();
 const outputAttachmentCapabilities = new Map();
@@ -252,8 +254,10 @@ const historyProcessDetailCache = createHistoryProcessDetailCache({ limit: 96 })
 // into an empty value on every phone poll.
 const threadSettingsFallbackCache = new Map();
 let codexCurrentThreadCache = { at: 0, selection: null };
-let foregroundNoticeThreadSnapshot = [];
-let foregroundNoticeSnapshotReady = false;
+const foregroundNoticeStore = new ForegroundNoticeStore({
+  file: FOREGROUND_NOTICE_STORE_FILE,
+  capacity: Number(process.env.CODEX2FRP_FOREGROUND_NOTICE_CAPACITY || 256),
+});
 let modelCatalogCache = { mtimeMs: -1, path: '', models: null };
 let liveModeOptionsCache = { at: 0, value: null };
 let keepAwakeProcess = null;
@@ -1882,8 +1886,6 @@ function compactForegroundThreadSnapshot(thread) {
     runtimeTerminalKind: thread.runtimeTerminalKind || '',
     runtimeUpdatedAt: thread.runtimeUpdatedAt || '',
     runtimeTurnId: thread.runtimeTurnId || '',
-    runtimeError: thread.runtimeError || '',
-    runtimeFinalText: thread.runtimeFinalText || '',
   };
 }
 
@@ -1895,15 +1897,42 @@ function handleForegroundNotices(req, res) {
   const now = new Date().toISOString();
   const threads = listCodexThreads(limit, { includeSubagents: false });
   const currentSnapshot = threads.map(compactForegroundThreadSnapshot);
-  const notices = foregroundNoticeSnapshotReady
-    ? createForegroundNoticesForThreadSnapshots(foregroundNoticeThreadSnapshot, currentSnapshot, { now }).slice(0, 8)
+  const previousSnapshot = foregroundNoticeStore.getSnapshot();
+  const generated = previousSnapshot.ready
+    ? createForegroundNoticesForThreadSnapshots(previousSnapshot.threads, currentSnapshot, { now })
     : [];
-  foregroundNoticeThreadSnapshot = currentSnapshot;
-  foregroundNoticeSnapshotReady = true;
+  const appended = foregroundNoticeStore.commitObservation(currentSnapshot, generated);
+  const hasCursor = url.searchParams.has('cursor');
+  const cursorText = url.searchParams.get('cursor') || '';
+  if (hasCursor && (!/^\d+$/.test(cursorText) || !Number.isSafeInteger(Number(cursorText)))) {
+    return json(res, 400, { ok: false, code: 'BAD_NOTICE_CURSOR', message: '通知游标无效。' });
+  }
+  const ringTail = foregroundNoticeStore.readAfter(Number.MAX_SAFE_INTEGER, { limit: 1 });
+  const legacyNotices = appended.slice(0, 8);
+  const page = hasCursor
+    ? foregroundNoticeStore.readAfter(cursorText, {
+      limit: url.searchParams.get('noticeLimit') || url.searchParams.get('pageSize'),
+    })
+    : {
+      notices: legacyNotices,
+      nextCursor: legacyNotices.length
+        ? legacyNotices[legacyNotices.length - 1].cursor
+        : ringTail.latestCursor,
+      oldestCursor: foregroundNoticeStore.readAfter(0, { limit: 1 }).oldestCursor,
+      latestCursor: ringTail.latestCursor,
+      hasMore: appended.length > 8,
+      resetRequired: false,
+    };
   return json(res, 200, {
     ok: true,
-    notices,
-    count: notices.length,
+    notices: page.notices,
+    count: page.notices.length,
+    nextCursor: page.nextCursor,
+    oldestCursor: page.oldestCursor,
+    latestCursor: page.latestCursor,
+    hasMore: page.hasMore,
+    resetRequired: page.resetRequired,
+    cursorMode: hasCursor,
     snapshotAt: now,
   });
 }
@@ -2842,7 +2871,15 @@ function cacheHistoryProcessDetails(history = {}) {
     const presentationId = safeHistoryPresentationId(turn && turn.presentationId);
     if (!process || !presentationId || !isTerminalHistoryProcess(process)) continue;
     const revision = processDetailRevision(process);
-    historyProcessDetailCache.set({ threadId, fileSignature, presentationId, revision, process });
+    historyProcessDetailCache.set({
+      threadId,
+      fileSignature,
+      presentationId,
+      revision,
+      process,
+      timeline: Array.isArray(turn.timeline) ? turn.timeline : [],
+      segments: Array.isArray(turn.segments) ? turn.segments : [],
+    });
   }
 }
 
@@ -4690,6 +4727,25 @@ function enrichHistoryProcessDetail(process, req, page) {
   };
 }
 
+function enrichHistoryProcessTimeline(cached, req) {
+  const timeline = (Array.isArray(cached.timeline) ? cached.timeline : []).map(entry => ({
+    ...entry,
+    ...(Array.isArray(entry.attachments)
+      ? { attachments: enrichAttachmentList(entry.attachments, req, { inlineData: false }) }
+      : {}),
+  }));
+  const segments = (Array.isArray(cached.segments) ? cached.segments : []).map(segment => ({
+    ...segment,
+    items: Array.isArray(segment.items) ? segment.items.map(item => ({
+      ...item,
+      ...(Array.isArray(item.attachments)
+        ? { attachments: enrichAttachmentList(item.attachments, req, { inlineData: false }) }
+        : {}),
+    })) : [],
+  }));
+  return { timeline, segments };
+}
+
 function cachedHistoryProcessDetail(threadId = '', presentationId = '', revision = '') {
   const file = findCodexSessionFileByThreadId(threadId);
   if (!file) return null;
@@ -4744,6 +4800,7 @@ function handleHistoryProcessDetail(req, res, route) {
       nextBefore: page.nextBefore,
       nextCursor: page.nextCursor,
       process: enrichHistoryProcessDetail(cached.process, req, page),
+      ...enrichHistoryProcessTimeline(cached, req),
     });
   } catch (error) {
     if (error && error.code === 'PROCESS_DETAIL_CURSOR_STALE') {

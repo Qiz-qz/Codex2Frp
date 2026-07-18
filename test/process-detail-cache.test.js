@@ -16,6 +16,8 @@ function entry(index, fileSignature = '100:1') {
     presentationId: `presentation-${index}`,
     revision: revision(index % 10),
     process: { turnId: `turn-${index}`, detailActivities: [{ id: `detail-${index}` }] },
+    timeline: [{ id: `narrative-${index}`, kind: 'commentary', publicNarrative: 'public progress' }],
+    segments: [{ id: `segment-${index}`, kind: 'commentary', items: [{ id: `narrative-${index}` }] }],
   };
 }
 
@@ -25,6 +27,8 @@ test('summary-preheated process detail cache returns the exact visible presentat
   assert.equal(cache.set(visible), true);
   const hit = cache.get(visible);
   assert.equal(hit.process, visible.process);
+  assert.equal(hit.timeline, visible.timeline);
+  assert.equal(hit.segments, visible.segments);
   assert.equal(hit.presentationId, visible.presentationId);
 });
 

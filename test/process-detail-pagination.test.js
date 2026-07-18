@@ -143,6 +143,9 @@ test('history process detail endpoint is read-only, token-protected, and capabil
   assert.doesNotMatch(functionSource('handleHistoryProcessDetail'), /fullHistory:\s*true|parseCodexThreadHistory/);
   assert.match(functionSource('handleHistoryProcessDetail'), /pageProcessDetailActivities/);
   assert.match(functionSource('enrichHistoryProcessDetail'), /enrichAttachmentList\(activity\.attachments, req, \{ inlineData: false \}\)/);
+  assert.match(functionSource('enrichHistoryProcessTimeline'), /timeline[\s\S]*segments/,
+    'completed detail response restores the same public narrative and operation segments as a running turn');
+  assert.match(functionSource('handleHistoryProcessDetail'), /enrichHistoryProcessTimeline\(cached, req\)/);
   assert.match(functionSource('dispatchRequest'), /historyProcessDetailRoute\(pathname\)[\s\S]*handleHistoryProcessDetail[\s\S]*handleV3ApiRequest/);
 });
 
