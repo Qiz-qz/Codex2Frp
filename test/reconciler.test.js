@@ -63,15 +63,22 @@ function canonicalUser(id, text, turnId, order, timestamp) {
   };
 }
 
-function fallbackUser(text, order, timestamp, localImages = []) {
+function fallbackUser(text, order, timestamp, localImages = [], clientId = '') {
   return {
     type: 'event_msg', timestamp, _stableOrder: order,
-    payload: { type: 'user_message', message: text, local_images: localImages },
+    payload: {
+      type: 'user_message', message: text, local_images: localImages,
+      ...(clientId ? { client_id: clientId } : {}),
+    },
   };
 }
 
 function commentaryEvents(reconciler) {
   return reconciler.snapshot().events.filter(event => event.summaryKind === 'commentary');
+}
+
+function turnStateRows(turns) {
+  return turns.map(({ turnId, state }) => ({ turnId, state }));
 }
 
 test('initial event snapshot exposes one canonical row for an adjacent fallback and canonical desktop narrative', () => {
@@ -383,7 +390,8 @@ test('reconciler deduplicates matching RPC and file turn events into one unified
     fileEntry(turnItem('task_failed', 'turn-1', '2026-07-10T00:00:02.000Z'), 200),
   ]);
   assert.deepEqual(conflictingTerminal, []);
-  assert.deepEqual(reconciler.turnSnapshot(), [{ turnId: 'turn-1', state: 'completed' }]);
+  assert.deepEqual(turnStateRows(reconciler.turnSnapshot()), [{ turnId: 'turn-1', state: 'completed' }]);
+  assert.match(reconciler.turnSnapshot()[0].presentationRevision, /^v1-c\d+$/);
   assert.deepEqual(reconciler.snapshot().events.map(event => event.state), ['started', 'completed']);
 });
 
@@ -402,26 +410,28 @@ test('turn snapshots preserve rollout order across UUID versions, updates, rehyd
 
   const reconciler = new EventReconciler({ serverInstanceId: 'server-turn-order' });
   reconciler.ingestFileEntries(entries);
-  assert.deepEqual(reconciler.turnSnapshot(), expected);
+  assert.deepEqual(turnStateRows(reconciler.turnSnapshot()), expected);
   const initialSnapshot = reconciler.snapshot();
-  assert.deepEqual(initialSnapshot.turns, expected);
+  assert.deepEqual(turnStateRows(initialSnapshot.turns), expected);
   assert.deepEqual(reconciler.read({
     serverInstanceId: initialSnapshot.serverInstanceId,
     snapshotVersion: initialSnapshot.snapshotVersion,
     cursor: initialSnapshot.cursor,
-  }).turns, expected, 'cursor reads retain the same chronological turn order');
+  }).turns.map(({ turnId, state }) => ({ turnId, state })), expected,
+  'cursor reads retain the same chronological turn order');
 
   reconciler.ingestFileEntries([
     fileEntry(turnItem('task_complete', legacyContinuationTurn, '2026-07-16T00:00:00.000Z'), 400),
   ]);
-  assert.deepEqual(reconciler.turnSnapshot(), expected, 'a later lifecycle replay cannot move an old turn');
+  assert.deepEqual(turnStateRows(reconciler.turnSnapshot()), expected,
+    'a later lifecycle replay cannot move an old turn');
 
   reconciler.rehydrate(entries);
-  assert.deepEqual(reconciler.snapshot().turns, expected);
+  assert.deepEqual(turnStateRows(reconciler.snapshot().turns), expected);
 
   const restarted = new EventReconciler({ serverInstanceId: 'server-turn-order-restart' });
   restarted.rehydrate(entries);
-  assert.deepEqual(restarted.snapshot().turns, expected);
+  assert.deepEqual(turnStateRows(restarted.snapshot().turns), expected);
 });
 
 test('a timestamp-less realtime turn appends after file history until its file anchor arrives', async () => {
@@ -442,12 +452,13 @@ test('a timestamp-less realtime turn appends after file history until its file a
     { turnId: oldTurn, state: 'completed' },
     { turnId: currentTurn, state: 'started' },
   ];
-  assert.deepEqual(reconciler.snapshot().turns, expected);
+  assert.deepEqual(turnStateRows(reconciler.snapshot().turns), expected);
 
   reconciler.ingestFileEntries([
     fileEntry(turnItem('task_started', currentTurn, '2026-07-15T17:00:00.000Z'), 300),
   ]);
-  assert.deepEqual(reconciler.snapshot().turns, expected, 'the authoritative file replay keeps the same slot');
+  assert.deepEqual(turnStateRows(reconciler.snapshot().turns), expected,
+    'the authoritative file replay keeps the same slot');
 });
 
 test('a stale file start still upgrades a completed RPC turn to its authoritative rollout position', async () => {
@@ -474,7 +485,7 @@ test('a stale file start still upgrades a completed RPC turn to its authoritativ
     fileEntry(turnItem('task_started', rpcFirstTurn, '2026-07-15T17:00:00.000Z'), 300),
   ]);
   assert.deepEqual(accepted, [], 'stale lifecycle rows remain unpublished');
-  assert.deepEqual(reconciler.snapshot().turns, [
+  assert.deepEqual(turnStateRows(reconciler.snapshot().turns), [
     { turnId: earlierFileTurn, state: 'completed' },
     { turnId: rpcFirstTurn, state: 'completed' },
   ]);
@@ -483,7 +494,7 @@ test('a stale file start still upgrades a completed RPC turn to its authoritativ
     fileEntry(turnItem('task_started', rpcFirstTurn, '2026-07-15T17:00:00.000Z'), 300),
     fileEntry(turnItem('task_complete', rpcFirstTurn, '2026-07-15T17:01:00.000Z'), 400),
   ]);
-  assert.deepEqual(reconciler.snapshot().turns, [
+  assert.deepEqual(turnStateRows(reconciler.snapshot().turns), [
     { turnId: rpcFirstTurn, state: 'completed' },
   ], 'a truncated full replay rebuilds anchors only from surviving file rows');
 });
@@ -615,10 +626,11 @@ test('matching stable user record identity can pair complementary records across
   const users = reconciler.snapshot().events.filter(event => event.role === 'user');
   assert.equal(users.length, 1);
   assert.equal(users[0].turnId, turnId);
-  assert.equal(users[0].delivery, 'steer');
+  assert.equal(users[0].delivery, 'initial');
+  assert.equal(users[0].showGuidedBadge, false);
 });
 
-test('paired active-turn user records keep canonical steer identity while fallback only adds attachments', () => {
+test('paired active-turn primary user records stay initial while fallback only adds attachments', () => {
   const turnId = 'turn-user-pair-steer';
   const timestamp = '2026-07-10T10:10:00.000Z';
   const reconciler = new EventReconciler({ serverInstanceId: 'server-user-pair-steer' });
@@ -629,7 +641,7 @@ test('paired active-turn user records keep canonical steer identity while fallba
   const cursorAfterCanonical = reconciler.snapshot().cursor;
   const canonicalSnapshot = reconciler.snapshot().events.filter(event => event.role === 'user');
   assert.equal(canonicalSnapshot.length, 1);
-  assert.equal(canonicalSnapshot[0].delivery, 'steer');
+  assert.equal(canonicalSnapshot[0].delivery, 'initial');
   assert.equal(canonicalSnapshot[0].turnId, turnId);
 
   const accepted = reconciler.ingestFileEntries([
@@ -638,23 +650,24 @@ test('paired active-turn user records keep canonical steer identity while fallba
   assert.equal(accepted.length, 1, 'the safe attachment supplement is one upsert delta');
   assert.equal(accepted[0].cursor, cursorAfterCanonical + 1);
   assert.equal(accepted[0].eventId, canonicalSnapshot[0].eventId);
-  assert.equal(accepted[0].delivery, 'steer', 'fallback cannot downgrade canonical delivery');
+  assert.equal(accepted[0].delivery, 'initial', 'fallback cannot change canonical delivery');
   assert.equal(accepted[0].turnId, turnId, 'fallback cannot erase canonical protocol turn identity');
   assert.deepEqual(accepted[0].attachments.map(item => item.name), ['input.png']);
 
   const snapshotUsers = reconciler.snapshot().events.filter(event => event.role === 'user');
   assert.equal(snapshotUsers.length, 1, 'the paired desktop records remain exactly once in snapshots');
-  assert.equal(snapshotUsers[0].delivery, 'steer');
+  assert.equal(snapshotUsers[0].delivery, 'initial');
   assert.equal(snapshotUsers[0].turnId, turnId);
 });
 
-test('paired steer semantics survive delta reads, rehydrate, and a fresh reconciler restart', () => {
+test('explicit mobile guided semantics survive delta reads, rehydrate, and a fresh reconciler restart', () => {
   const turnId = 'turn-user-pair-rehydrate';
   const timestamp = '2026-07-10T10:20:00.000Z';
   const entries = [
     fileEntry({ ...turnItem('task_started', turnId, '2026-07-10T10:19:59.000Z'), _stableOrder: 1 }, 0),
     fileEntry(canonicalUser('user-canonical-rehydrate', '同轮引导', turnId, 2, timestamp), 100),
-    fileEntry(fallbackUser('同轮引导', 3, '2026-07-10T10:20:00.001Z', ['C:/private/guide.png']), 200),
+    fileEntry(fallbackUser('同轮引导', 3, '2026-07-10T10:20:00.001Z',
+      ['C:/private/guide.png'], 'mobile-steer-rehydrate-1'), 200),
   ];
   const reconciler = new EventReconciler({ serverInstanceId: 'server-user-pair-rehydrate' });
   reconciler.ingestFileEntries(entries.slice(0, 2));
@@ -669,12 +682,14 @@ test('paired steer semantics survive delta reads, rehydrate, and a fresh reconci
   assert.equal(delta.mode, 'delta');
   assert.equal(delta.events.length, 1);
   assert.equal(delta.events[0].delivery, 'steer');
+  assert.equal(delta.events[0].showGuidedBadge, true);
   assert.equal(delta.events[0].turnId, turnId);
 
   reconciler.rehydrate(entries);
   const rehydrated = reconciler.snapshot().events.filter(event => event.role === 'user');
   assert.equal(rehydrated.length, 1);
   assert.equal(rehydrated[0].delivery, 'steer');
+  assert.equal(rehydrated[0].showGuidedBadge, true);
   assert.equal(rehydrated[0].turnId, turnId);
 
   const restarted = new EventReconciler({ serverInstanceId: 'server-user-pair-restarted' });
@@ -682,6 +697,7 @@ test('paired steer semantics survive delta reads, rehydrate, and a fresh reconci
   const restartedUsers = restarted.snapshot().events.filter(event => event.role === 'user');
   assert.equal(restartedUsers.length, 1);
   assert.equal(restartedUsers[0].delivery, 'steer');
+  assert.equal(restartedUsers[0].showGuidedBadge, true);
   assert.equal(restartedUsers[0].turnId, turnId);
   assert.equal(restartedUsers[0].eventId, rehydrated[0].eventId, 'stable file identity survives backend restart');
 });
@@ -698,7 +714,8 @@ test('independent same-text canonical user messages are never mistaken for one s
   const users = reconciler.snapshot().events.filter(event => event.role === 'user');
   assert.equal(users.length, 2);
   assert.notEqual(users[0].eventId, users[1].eventId);
-  assert.deepEqual(users.map(event => event.delivery), ['steer', 'steer']);
+  assert.deepEqual(users.map(event => event.delivery), ['initial', 'steer']);
+  assert.deepEqual(users.map(event => event.showGuidedBadge), [false, false]);
 });
 
 test('independent same-text fallback user messages are never merged without a canonical pair identity', () => {
@@ -731,7 +748,7 @@ test('user attachment merge state stays bounded while recent paired upserts stil
   const userUpdate = update.find(event => event.role === 'user');
 
   assert.equal(reconciler.userAttachmentsByEventId.size <= 256, true);
-  assert.equal(userUpdate.delivery, 'steer');
+  assert.equal(userUpdate.delivery, 'initial');
   assert.equal(userUpdate.turnId, 'turn-recent');
   assert.deepEqual(userUpdate.attachments.map(item => item.name), ['256.png']);
 });
@@ -765,7 +782,7 @@ test('duplicate and older RPC notification sequences are ignored without changin
   assert.equal(older.duplicate, true);
   assert.equal(duplicate.duplicate, true);
   assert.equal(rehydrateCalls, 0);
-  assert.deepEqual(reconciler.turnSnapshot(), [{ turnId: 'turn-5', state: 'started' }]);
+  assert.deepEqual(turnStateRows(reconciler.turnSnapshot()), [{ turnId: 'turn-5', state: 'started' }]);
 });
 
 test('reasoning progress is one updatable event per active turn while tool history remains durable', () => {
@@ -827,7 +844,7 @@ test('notification gap triggers full rehydrate and forces clients onto a new sna
   const snapshot = reconciler.snapshot();
   assert.equal(snapshot.snapshotVersion, 2);
   assert.deepEqual(snapshot.events.map(event => event.state), ['started', 'completed']);
-  assert.deepEqual(reconciler.turnSnapshot(), [{ turnId: 'turn-current', state: 'completed' }]);
+  assert.deepEqual(turnStateRows(reconciler.turnSnapshot()), [{ turnId: 'turn-current', state: 'completed' }]);
   assert.equal(reconciler.read({
     serverInstanceId: 'server-a',
     snapshotVersion: 1,
@@ -1327,6 +1344,31 @@ test('error and warning notifications use fixed safe summaries instead of raw di
   assert.doesNotMatch(JSON.stringify(reconciler.snapshot()), /private\\error\.log/);
 });
 
+test('retry errors update one desktop-style reconnect row through the fifth attempt', async () => {
+  const reconciler = new EventReconciler({ serverInstanceId: 'server-reconnect-attempts' });
+  await reconciler.ingestRpcNotification({
+    sequence: 1,
+    method: 'turn/started',
+    params: { turn: { id: 'turn-reconnect' } },
+  });
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const result = await reconciler.ingestRpcNotification({
+      sequence: attempt + 1,
+      method: 'error',
+      params: { turnId: 'turn-reconnect', willRetry: true, error: SECRET_BODY, token: SECRET_ARGUMENT },
+    });
+    assert.equal(result.accepted.length, 1);
+    assert.equal(result.accepted[0].text, `正在重新连接 ${attempt}/5`);
+    assert.equal(result.accepted[0].toolKind, 'error');
+    assert.equal(result.accepted[0].noticeKind, 'reconnect');
+    assert.equal(result.accepted[0].state, 'running');
+  }
+  const reconnectRows = reconciler.snapshot().events.filter(event => event.noticeKind === 'reconnect');
+  assert.equal(reconnectRows.length, 1);
+  assert.equal(reconnectRows[0].text, '正在重新连接 5/5');
+  assertNoRawNotificationCanaries(reconciler.snapshot());
+});
+
 test('warning taxonomy uses fixed labels and stable dedupe identities', async () => {
   const reconciler = new EventReconciler({ serverInstanceId: 'server-warning-taxonomy' });
   await reconciler.ingestRpcNotification({ sequence: 1, method: 'turn/started', params: { turn: { id: 'turn-warn' } } });
@@ -1527,6 +1569,41 @@ test('rawResponseItem completed projects only a paired static exec ImageContent 
   assertNoSecretCanaries(assert, reconciler.snapshot());
   assert.doesNotMatch(JSON.stringify(reconciler.snapshot()), /base64/);
   assert.equal(JSON.stringify(reconciler.snapshot()).includes(SYNTHETIC_IMAGE_DIR), false);
+});
+
+test('rawResponseItem completed immediately projects public exec and apply_patch activities', async () => {
+  const reconciler = new EventReconciler({ serverInstanceId: 'server-raw-public-tools' });
+  const command = await reconciler.ingestRpcNotification({
+    sequence: 1,
+    method: 'rawResponseItem/completed',
+    params: {
+      threadId: 'thread-tools', turnId: 'turn-tools',
+      item: {
+        type: 'custom_tool_call', name: 'exec', call_id: 'raw-command', status: 'completed',
+        input: 'const r=await tools.exec_command({"cmd":"rg -n reconnect lib/events"});text(r.output);',
+      },
+    },
+  });
+  const file = await reconciler.ingestRpcNotification({
+    sequence: 2,
+    method: 'rawResponseItem/completed',
+    params: {
+      threadId: 'thread-tools', turnId: 'turn-tools',
+      item: {
+        type: 'custom_tool_call', name: 'apply_patch', call_id: 'raw-patch', status: 'completed',
+        input: '*** Begin Patch\n*** Update File: lib/example.js\n@@\n-old\n+new\n*** End Patch',
+      },
+    },
+  });
+
+  assert.equal(command.accepted.length, 1);
+  assert.equal(command.accepted[0].toolKind, 'command');
+  assert.equal(command.accepted[0].turnId, 'turn-tools');
+  assert.match(command.accepted[0].displayDetail, /^rg -n reconnect lib\/events/);
+  assert.equal(file.accepted.length, 1);
+  assert.equal(file.accepted[0].toolKind, 'file');
+  assert.equal(file.accepted[0].turnId, 'turn-tools');
+  assert.equal(file.accepted[0].fileLabel, 'lib/example.js');
 });
 
 test('rawResponseItem rejects invalid image URLs and consumes the same-turn producer', async () => {

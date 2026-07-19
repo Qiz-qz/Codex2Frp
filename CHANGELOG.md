@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.22] - 2026-07-20
+
+- Publishes a stable per-turn `presentationRevision`, so the phone refreshes in-place ChatGPT process changes even when the transport cursor or turn shell remains unchanged.
+- Preserves the complete privacy-safe desktop timeline in realtime and completed-task projections, including ordered command, file, image, plan, commentary, and reconnect activities.
+- Treats guidance as an explicit `mobile-steer-*` identity instead of inferring it from ordinary desktop delivery, preventing normal messages from being mislabeled as guided.
+- Bounds the realtime revision journal and recovers lagging clients with an authoritative snapshot instead of allowing unbounded backend memory growth.
+- Keeps subagent content private while retaining only the desktop-visible lifecycle identity required by the phone UI.
+
+This public backend release corresponds to internal Codex2Frp 2.4.22 and remains backend-only.
+
 ## [1.4.18] - 2026-07-19
 
 - Projects current ChatGPT computer-use activities as a dedicated privacy-safe surface kind, so mobile clients can display their desktop-equivalent identity instead of a generic Node.js tool row.

@@ -479,6 +479,12 @@ test('config and status expose complete Codex client state for mobile', () => {
   assert.match(serverSource, /readLiveCodexModeOptions/, 'backend can read live Codex menu option lists');
   assert.match(serverSource, /function cachedLiveModeOptions/, 'backend keeps live menu choices available without opening menus during polling');
   assert.match(serverSource, /readCodexModeOptionsViaCdp/, 'backend discovers model, reasoning, and speed options from the real Codex menu');
+  assert.match(functionBody('readCodexModeOptionsViaCdp'), /reasoningOptionFromDesktopMenuText/,
+    'live reasoning discovery preserves two visually identical extreme rows as distinct canonical efforts');
+  assert.match(functionBody('selectCodexComposerModeMenuItemViaCdp'), /reasoningOptionFromDesktopMenuText\(item\.text\)\?\.key\s*===\s*reasoningTargetKey/,
+    'legacy CDP selection uses the quota description to choose the second extreme row');
+  assert.match(functionBody('verifyCodexReasoningModeSwitch'), /verifiedBy:\s*'menu-selection'/,
+    'the uniquely identified second extreme row can be confirmed even when the closed trigger omits its description');
   assert.match(functionBody('codexModeMenuItems'), /cmdkItem|radixItem/, 'live option discovery only accepts real menu collection items');
   assert.doesNotMatch(functionBody('codexModeMenuItems'), /item\.rect\.w < 40/, 'live option discovery does not absorb ordinary sidebar buttons by size');
   assert.match(statusBody, /nextTurnSettings/, 'status separates exact next-turn composer state from session history');

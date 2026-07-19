@@ -112,7 +112,7 @@ test('matching server and snapshot metadata returns only events after the client
   });
 });
 
-test('one reasoning status per turn is updated in place and stale cursors recover by snapshot', () => {
+test('one reasoning status per turn is compacted in snapshots while deltas retain every revision', () => {
   const feed = new EventFeed({ serverInstanceId: 'server-a' });
   feed.publish([
     { eventId: 'reasoning-turn-a', order: 1, type: 'summary', summaryKind: 'reasoning', turnId: 'turn-a', body: 'first' },
@@ -129,10 +129,52 @@ test('one reasoning status per turn is updated in place and stale cursors recove
   assert.equal(snapshot.events.length, 2);
   assert.equal(snapshot.events.find(item => item.eventId === 'reasoning-turn-a').body, 'second');
   assert.equal(feed.read({ serverInstanceId: 'server-a', snapshotVersion: 1, cursor: 2 }).mode, 'delta');
-  assert.equal(feed.read({ serverInstanceId: 'server-a', snapshotVersion: 1, cursor: 0 }).mode, 'snapshot');
+  const fullDelta = feed.read({ serverInstanceId: 'server-a', snapshotVersion: 1, cursor: 0 });
+  assert.equal(fullDelta.mode, 'delta');
+  assert.deepEqual(fullDelta.events.map(item => item.cursor), [1, 2, 3]);
+  assert.deepEqual(fullDelta.events.filter(item => item.eventId === 'reasoning-turn-a')
+    .map(item => item.body), ['first', 'second']);
   assert.deepEqual(feed.publish([
     { eventId: 'reasoning-turn-a', order: 4, type: 'summary', summaryKind: 'reasoning', turnId: 'turn-a', body: 'second' },
   ]), []);
+});
+
+test('bounded revision journal forces a snapshot when a client cursor falls behind the retained window', () => {
+  const feed = new EventFeed({ serverInstanceId: 'server-bounded-journal', maxChanges: 2 });
+  feed.publish([event('one', 1), event('two', 2), event('three', 3)]);
+
+  const stale = feed.read({ serverInstanceId: 'server-bounded-journal', snapshotVersion: 1, cursor: 0 });
+  assert.equal(stale.mode, 'snapshot');
+  assert.equal(stale.cursor, 3);
+  assert.deepEqual(stale.events.map(item => item.eventId), ['one', 'two', 'three']);
+
+  const current = feed.read({ serverInstanceId: 'server-bounded-journal', snapshotVersion: 1, cursor: 1 });
+  assert.equal(current.mode, 'delta');
+  assert.deepEqual(current.events.map(item => item.cursor), [2, 3]);
+});
+
+test('per-turn presentation revision advances only when that turn changes', () => {
+  const feed = new EventFeed({ serverInstanceId: 'server-turn-revision' });
+  feed.publish([
+    { eventId: 'turn-a-reasoning', order: 1, type: 'summary', turnId: 'turn-a', body: 'first' },
+    { eventId: 'turn-b-command', order: 2, type: 'summary', turnId: 'turn-b', body: 'command' },
+  ]);
+
+  assert.equal(feed.turnRevision('turn-a'), 'v1-c1');
+  assert.equal(feed.turnRevision('turn-b'), 'v1-c2');
+  assert.equal(feed.turnRevision('missing'), '');
+
+  feed.publish([
+    { eventId: 'turn-a-reasoning', order: 3, type: 'summary', turnId: 'turn-a', body: 'second' },
+  ]);
+  assert.equal(feed.turnRevision('turn-a'), 'v1-c3');
+  assert.equal(feed.turnRevision('turn-b'), 'v1-c2');
+
+  feed.replaceSnapshot([
+    { eventId: 'turn-a-reasoning', order: 1, type: 'summary', turnId: 'turn-a', body: 'rehydrated' },
+  ]);
+  assert.equal(feed.turnRevision('turn-a'), 'v2-c1');
+  assert.equal(feed.turnRevision('turn-b'), '');
 });
 
 test('generic activities upsert state, count, and attachments under one stable event id', () => {
@@ -163,7 +205,10 @@ test('generic activities upsert state, count, and attachments under one stable e
   assert.equal(update.length, 1);
   assert.equal(update[0].cursor, 2);
   assert.equal(feed.read({ serverInstanceId: 'server-a', snapshotVersion: 1, cursor: 1 }).mode, 'delta');
-  assert.equal(feed.read({ serverInstanceId: 'server-a', snapshotVersion: 1, cursor: 0 }).mode, 'snapshot');
+  const fullDelta = feed.read({ serverInstanceId: 'server-a', snapshotVersion: 1, cursor: 0 });
+  assert.equal(fullDelta.mode, 'delta');
+  assert.deepEqual(fullDelta.events.map(item => item.cursor), [1, 2]);
+  assert.deepEqual(fullDelta.events.map(item => item.state), ['running', 'succeeded']);
   const snapshot = feed.snapshot();
   assert.equal(snapshot.events.length, 1);
   assert.equal(snapshot.events[0].state, 'succeeded');

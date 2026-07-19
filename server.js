@@ -224,12 +224,12 @@ const CODEX_MODE_OPTIONS_REFRESH_TIMEOUT_MS = Number(process.env.CODEX2FRP_MODE_
 const CODEX_CONFIG_SWITCH_VERIFY_MS = Number(process.env.CODEX2FRP_CONFIG_SWITCH_VERIFY_MS || 2200);
 const CODEX_WINDOW_RESTORE_SETTLE_MS = Number(process.env.CODEX2FRP_WINDOW_RESTORE_SETTLE_MS || 260);
 const REASONING_MODE_TARGETS = {
-  low: { key: 'low', value: 'low', label: '低', displayName: '低' },
+  low: { key: 'low', value: 'low', label: '轻度', displayName: '轻度' },
   medium: { key: 'medium', value: 'medium', label: '中', displayName: '中' },
   high: { key: 'high', value: 'high', label: '高', displayName: '高' },
   xhigh: { key: 'xhigh', value: 'xhigh', label: '极高', displayName: '极高' },
-  max: { key: 'max', value: 'max', label: '最大', displayName: '最大' },
-  ultra: { key: 'ultra', value: 'ultra', label: '超强', displayName: '超强' },
+  max: { key: 'max', value: 'max', label: '最大', displayName: '最大', desktopVisible: false },
+  ultra: { key: 'ultra', value: 'ultra', label: '极高', displayName: '极高', description: '更快消耗使用额度', accent: 'purple' },
 };
 const SPEED_MODE_TARGETS = {
   standard: { key: 'standard', value: 'default', serviceTier: 'default', label: '标准', displayName: '标准' },
@@ -3351,6 +3351,7 @@ function reasoningModeFromValue(value = '', updatedAt = '') {
   const raw = String(value || '').trim().toLowerCase();
   const aliases = {
     low: 'low',
+    '轻度': 'low',
     '低': 'low',
     medium: 'medium',
     med: 'medium',
@@ -6280,7 +6281,7 @@ function codexModeMenuItems(snapshot = {}) {
 }
 
 function findCodexModeControlButton(snapshot = {}) {
-  const reasoningLabels = ['低', '中', '高', '超高'];
+  const reasoningLabels = ['轻度', '低', '中', '高', '极高', '超高'];
   return (snapshot.items || [])
     .filter(item => {
       if (!item.text || item.disabled || isBlockedCodexModeText(item.text)) return false;
@@ -6366,9 +6367,8 @@ async function readCodexModeOptionsViaCdp() {
     let snapshot = await openCodexModeMenuInClient(client);
 
     const reasoningOptions = uniqueModeOptions(codexModeMenuItems(snapshot)
-      .map(item => item.text.trim())
-      .filter(text => ['低', '中', '高', '超高'].includes(text))
-      .map(text => reasoningModeFromValue(text, new Date().toISOString())));
+      .map(item => modelOptionUtils.reasoningOptionFromDesktopMenuText(item.text))
+      .filter(Boolean));
 
     let modelOptions = [];
     const modelTrigger = findCodexSubmenuTriggerByText(snapshot, '模型') || codexModeMenuItems(snapshot)
@@ -6386,7 +6386,8 @@ async function readCodexModeOptionsViaCdp() {
         modelItems = codexModeMenuItems(snapshot);
       }
       modelOptions = uniqueModelOptions(modelItems
-        .filter(item => !item.text.includes('模型') && !item.text.includes('速度') && !['低', '中', '高', '超高'].includes(item.text.trim()))
+        .filter(item => !item.text.includes('模型') && !item.text.includes('速度')
+          && !modelOptionUtils.reasoningOptionFromDesktopMenuText(item.text))
         .map(item => modelOptionFromMenuText(item.text))
         .filter(Boolean));
     }
@@ -6561,12 +6562,13 @@ async function selectCodexComposerModeMenuItemViaCdp(targetLabels = [], options 
     await client.call('Input.setIgnoreInputEvents', { ignore: false }).catch(() => {});
     await delay(250);
     const kind = String(options.kind || '');
-    const reasoningLabels = ['低', '中', '高', '超高'];
-    const reasoningTargetLabel = labels.includes('xhigh') || labels.includes('超高') ? '超高'
-      : labels.includes('high') || labels.includes('高') ? '高'
-        : labels.includes('medium') || labels.includes('中') ? '中'
-          : labels.includes('low') || labels.includes('低') ? '低'
-            : '';
+    const reasoningLabels = ['轻度', '低', '中', '高', '极高', '超高'];
+    const reasoningTargetKey = labels.includes('ultra') ? 'ultra'
+      : labels.includes('xhigh') || labels.includes('极高') || labels.includes('超高') ? 'xhigh'
+        : labels.includes('high') || labels.includes('高') ? 'high'
+          : labels.includes('medium') || labels.includes('中') ? 'medium'
+            : labels.includes('low') || labels.includes('轻度') || labels.includes('低') ? 'low'
+              : '';
     const compact = value => String(value || '').replace(/\s+/g, '').toLowerCase();
     const modelKey = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9.]+/g, '');
     const normalizedLabels = labels.map(label => ({ raw: label, compact: compact(label), model: modelKey(label) })).filter(label => label.compact || label.model);
@@ -6595,7 +6597,8 @@ async function selectCodexComposerModeMenuItemViaCdp(targetLabels = [], options 
         return bExact - aExact || b.rect.x - a.rect.x || a.rect.y - b.rect.y;
       })[0];
     const findReasoningTargetItem = snapshot => menuItems(snapshot)
-      .filter(item => item.role === 'menuitem' && item.text.trim() === reasoningTargetLabel)
+      .filter(item => item.role === 'menuitem'
+        && modelOptionUtils.reasoningOptionFromDesktopMenuText(item.text)?.key === reasoningTargetKey)
       .sort((a, b) => a.rect.y - b.rect.y)[0];
     const findModeControlButton = findCodexModeControlButton;
     const findSubmenuTriggerByText = findCodexSubmenuTriggerByText;
@@ -6751,7 +6754,7 @@ async function readCodexComposerModeButtonTextViaCdp() {
   try {
     await client.call('Runtime.enable').catch(() => {});
     return await cdpEvaluate(client, `(() => {
-      const reasoningLabels = ['低', '中', '高', '超高'];
+      const reasoningLabels = ['轻度', '低', '中', '高', '极高', '超高'];
       const visible = el => {
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -7542,13 +7545,7 @@ function modeTextMatchesTarget(text = '', target = {}) {
 }
 
 function reasoningKeyFromComposerModeText(text = '') {
-  const compact = String(text || '').replace(/\s+/g, '');
-  if (!compact) return '';
-  if (compact.includes('超高')) return 'xhigh';
-  if (compact.includes('高')) return 'high';
-  if (compact.includes('中')) return 'medium';
-  if (compact.includes('低')) return 'low';
-  return '';
+  return modelOptionUtils.reasoningOptionFromDesktopMenuText(text)?.key || '';
 }
 
 function composerModeTextMatchesReasoning(text = '', target = {}) {
@@ -7572,6 +7569,10 @@ function speedModeMatches(actual = {}, target = {}) {
 async function verifyCodexReasoningModeSwitch(threadId = '', target = {}, selection = {}, options = {}) {
   const deadline = Date.now() + Number(options.timeoutMs || 12000);
   let lastEvidence = selection?.selected?.text || '';
+  const selectedMode = modelOptionUtils.reasoningOptionFromDesktopMenuText(lastEvidence);
+  if (selectedMode && reasoningModeMatches(selectedMode, target)) {
+    return { ...target, available: true, verifiedBy: 'menu-selection', evidence: lastEvidence };
+  }
   while (Date.now() < deadline) {
     assertExplicitUiActionNotAborted();
     try {

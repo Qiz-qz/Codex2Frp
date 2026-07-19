@@ -1,0 +1,12 @@
+Codex2Frp public release: 1.4.22
+Internal backend capability line: 2.4.22
+Built: 2026-07-20
+
+Verification:
+- Backend unit tests: 781/781 passed.
+- Default integration tests: 7 passed; 4 opt-in isolated live tests skipped by contract.
+- Public projection tests cover ordered realtime and completed-task desktop timelines, stable presentation revisions, explicit guided-message identity, bounded event replay and privacy-safe subagent lifecycle metadata.
+- Release contains only the Codex2Frp backend installer and verification files; no CodexHM source or package is included.
+
+SHA-256:
+5C5F05D1958EF416772C5469701AFC71D9572449C7F56B1177222EE234DFD1D8  Codex2FrpSetup-v1.4.22.exe

@@ -241,7 +241,7 @@ test('task_started before the first current user record does not create an empty
   const turnId = 'turn-current-first-user';
   const turns = buildTurnViews([
     { type: 'turn', state: 'started', turnId, eventId: 'turn-start' },
-    { type: 'message', role: 'user', text: '真实首条任务', delivery: 'steer', turnId,
+    { type: 'message', role: 'user', text: '真实首条任务', delivery: 'initial', turnId,
       eventId: 'first-user' },
     { type: 'summary', summaryKind: 'commentary', text: '正在处理', body: '进展', turnId,
       eventId: 'commentary' },
@@ -251,6 +251,7 @@ test('task_started before the first current user record does not create an empty
   ], THREAD);
   assert.equal(turns.length, 1);
   assert.equal(turns[0].user.text, '真实首条任务');
+  assert.equal(turns[0].user.showGuidedBadge, false);
   assert.equal(turns[0].final.text, '完成');
 });
 

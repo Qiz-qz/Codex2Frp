@@ -989,6 +989,46 @@ test('queue CRUD, flush, and reconcile are guarded and flush starts turns throug
   ]);
 });
 
+test('mobile latest event scope compacts only initial snapshots and preserves the authoritative cursor', async () => {
+  const eventRuntime = {
+    async read() {
+      return {
+        mode: 'snapshot',
+        serverInstanceId: 'server-events',
+        snapshotVersion: 4,
+        cursor: 8,
+        events: [
+          { eventId: 'old-user', cursor: 1, turnId: 'turn-old', type: 'message' },
+          { eventId: 'old-final', cursor: 4, turnId: 'turn-old', type: 'message' },
+          { eventId: 'new-user', cursor: 5, turnId: 'turn-new', presentationId: 'presentation-new', type: 'message' },
+          { eventId: 'new-reasoning', cursor: 7, turnId: 'turn-new', presentationId: 'presentation-new', type: 'reasoning' },
+          { eventId: 'new-command', cursor: 8, turnId: 'turn-new', presentationId: 'presentation-new', type: 'tool' },
+        ],
+        turns: [
+          { turnId: 'turn-old', state: 'completed' },
+          { turnId: 'turn-new', presentationId: 'presentation-new', state: 'started' },
+        ],
+      };
+    },
+    async snapshot() { return { mode: 'snapshot', serverInstanceId: 'server-events', snapshotVersion: 4, cursor: 0, events: [], turns: [] }; },
+    async cursor() { return { serverInstanceId: 'server-events', snapshotVersion: 4, cursor: 8 }; },
+  };
+  const { router } = createRouter({ eventRuntime });
+
+  const response = await router.handle({
+    method: 'GET',
+    url: `/codex/v3/threads/${THREAD}/events?scope=latest`,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.mode, 'snapshot');
+  assert.equal(response.body.cursor, 8);
+  assert.deepEqual(response.body.turns.map(turn => turn.turnId), ['turn-new']);
+  assert.deepEqual(response.body.events.map(event => event.eventId), [
+    'new-user', 'new-reasoning', 'new-command',
+  ]);
+});
+
 test('desktop timeouts distinguish safe reads from uncertain steer delivery', async () => {
   const queue = new TurnInputQueue({ createId: () => 'queue-timeout-test' });
   const { router, service } = createRouter({ queue, queueCommandCoordinator: new SpyQueueCoordinator() });
@@ -1246,6 +1286,39 @@ test('the new-thread unreadable allowance expires instead of becoming a permanen
   assert.equal(flushed.statusCode, 400);
   assert.equal(flushed.body.error.kind, 'invalidRequest');
   assert.equal(queue.list(THREAD)[0].state, 'queued');
+});
+
+test('a specifically unmaterialized thread can start its first turn after the local time window expires', async () => {
+  let now = 1_000;
+  const queue = new TurnInputQueue();
+  const queueCommandCoordinator = new SpyQueueCoordinator();
+  const { router, service } = createRouter({ queue, queueCommandCoordinator, now: () => now });
+  service.results.set('startThread', { thread: { id: THREAD } });
+  await router.handle({ method: 'POST', url: '/codex/v3/threads', body: {} });
+  await queue.enqueue({ threadId: THREAD, clientRequestId: 'delayed-first-message', text: 'hello' });
+  now += 30_001;
+  const notMaterialized = new Error(
+    `thread ${THREAD} is not materialized yet; includeTurns is unavailable before first user message`,
+  );
+  notMaterialized.code = 'DESKTOP_RPC_ERROR';
+  notMaterialized.details = {
+    rpcError: {
+      code: -32600,
+      message: `thread ${THREAD} is not materialized yet; includeTurns is unavailable before first user message`,
+    },
+  };
+  service.results.set('readThread', notMaterialized);
+  service.results.set('startTurn', { turn: { id: 'delayed-first-turn' } });
+
+  const flushed = await router.handle({
+    method: 'POST',
+    url: `/codex/v3/threads/${THREAD}/queue/flush`,
+    body: {},
+  });
+
+  assert.equal(flushed.statusCode, 200);
+  assert.equal(flushed.body.item.state, 'accepted');
+  assert.equal(flushed.body.item.turnId, 'delayed-first-turn');
 });
 
 test('concurrent queue flushes coalesce on the accepted dispatch result', async () => {

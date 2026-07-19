@@ -10,6 +10,7 @@ const {
   modelOptionFromMenuText,
   modelOptionsForClient,
   reasoningOptionsForModel,
+  reasoningOptionFromDesktopMenuText,
   modelSupportsSpeed,
   speedOptionsForModel,
   normalizeModelOption,
@@ -63,15 +64,32 @@ test('models_cache reasoning metadata preserves default, max, and ultra exactly'
   assert.deepEqual(option.supportedReasoningEfforts, ['low', 'max', 'ultra']);
 });
 
-test('max and ultra are published only from authoritative model metadata', () => {
+test('desktop reasoning projection hides internal max and preserves the visible ultra tier', () => {
   const ordinary = normalizeModelOption({ slug: 'gpt-5.5', display_name: 'GPT-5.5' });
-  const extended = normalizeModelOption({
+  const sol = normalizeModelOption({
     slug: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol',
-    supported_reasoning_levels: ['low', 'medium', 'max', 'ultra'],
+    supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  });
+  const terra = normalizeModelOption({
+    slug: 'gpt-5.6-terra', display_name: 'GPT-5.6-Terra',
+    supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  });
+  const luna = normalizeModelOption({
+    slug: 'gpt-5.6-luna', display_name: 'GPT-5.6-Luna',
+    supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'],
   });
 
   assert.deepEqual(reasoningOptionsForModel(ordinary).map(item => item.key), ['low', 'medium', 'high', 'xhigh']);
-  assert.deepEqual(reasoningOptionsForModel(extended).map(item => item.key), ['low', 'medium', 'max', 'ultra']);
+  assert.deepEqual(reasoningOptionsForModel(sol).map(item => item.key), ['low', 'medium', 'high', 'xhigh', 'ultra']);
+  assert.deepEqual(reasoningOptionsForModel(terra).map(item => item.key), ['low', 'medium', 'high', 'xhigh', 'ultra']);
+  assert.deepEqual(reasoningOptionsForModel(luna).map(item => item.key), ['low', 'medium', 'high', 'xhigh']);
+});
+
+test('desktop reasoning menu parser distinguishes the second extreme tier by its quota description', () => {
+  assert.equal(reasoningOptionFromDesktopMenuText('轻度').key, 'low');
+  assert.equal(reasoningOptionFromDesktopMenuText('极高').key, 'xhigh');
+  assert.equal(reasoningOptionFromDesktopMenuText('极高\n更快消耗使用额度').key, 'ultra');
+  assert.equal(reasoningOptionFromDesktopMenuText('最大'), null);
 });
 
 test('current model metadata filters a global live reasoning cache', () => {

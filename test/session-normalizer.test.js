@@ -266,6 +266,11 @@ test('current exec wrapper publishes only one direct shell command string litera
   } });
   assert.equal(direct.displayDetail, 'Get-ChildItem -Force');
   assert.equal(escaped.displayDetail, "rg -n 'hello' entry");
+  const current = normalizer.normalize({ type: 'response_item', payload: {
+    type: 'custom_tool_call', id: 'exec-current', call_id: 'exec-current-call', name: 'exec', status: 'completed',
+    input: 'const r = await tools.exec_command({cmd: "rg -n reconnect lib/events", workdir: "E:/workspace", yield_time_ms: 10000, max_output_tokens: 4000, tty: false}); text(r.output);',
+  } });
+  assert.equal(current.displayDetail, 'rg -n reconnect lib/events');
   const fullOptions = normalizer.normalize({ type: 'response_item', payload: {
     type: 'custom_tool_call', id: 'exec-options', call_id: 'exec-options-call', name: 'exec', status: 'completed',
     input: 'const result = await tools.shell_command({command: "Get-Date", justification: "Allowed", login: false, prefix_rule: ["git", "status"], sandbox_permissions: "use_default", timeout_ms: 10000, workdir: "E:/workspace"}); text(result);',
@@ -319,7 +324,7 @@ test('current exec wrapper publishes only one direct shell command string litera
     assert.equal(event.displayDetail, undefined, `${name} cannot publish exec detail`);
     assert.doesNotMatch(JSON.stringify(event), /PRIVATE_INEXACT_NAME/);
   }
-  assert.doesNotMatch(JSON.stringify([direct, escaped, fullOptions]), /PRIVATE_EXEC_OUTPUT|PRIVATE_EXEC_ARGUMENT|E:\/workspace|Allowed|git|status|use_default/);
+  assert.doesNotMatch(JSON.stringify([direct, escaped, current, fullOptions]), /PRIVATE_EXEC_OUTPUT|PRIVATE_EXEC_ARGUMENT|E:\/workspace|Allowed|git|status|use_default/);
 });
 
 test('strict multi exec wrappers publish bounded ordered display details and preserve duplicates', () => {
@@ -687,25 +692,54 @@ test('current managed permission environment context stays desktop-hidden', () =
   assert.equal(hidden, null);
 });
 
-test('turn reducer distinguishes active-turn steer, next-turn queue, and idle input', () => {
+test('turn reducer separates protocol delivery from the explicit mobile guided badge', () => {
   const normalizer = createNormalizer();
   normalizer.normalize(sessionItem('event_msg', { type: 'task_started', turn_id: 'turn-main' }));
 
-  const steer = normalizer.normalize(responseMessage('user', '', '当前轮补充', 'turn-main'));
+  const primary = normalizer.normalize(responseMessage('user', '', '当前轮首条', 'turn-main'));
+  const steer = normalizer.normalize(responseMessage('user', '', '桌面当前轮补充', 'turn-main'));
   const duplicateEvent = normalizer.normalize(sessionItem('event_msg', {
     type: 'user_message',
-    message: '当前轮补充',
+    message: '桌面当前轮补充',
+  }));
+  const guided = normalizer.normalize(sessionItem('event_msg', {
+    type: 'user_message', client_id: 'mobile-steer-contract-1', message: '手机明确引导',
+  }));
+  const explicitQueue = normalizer.normalize(sessionItem('event_msg', {
+    type: 'user_message', client_id: 'mobile-queue-contract-1', message: '手机明确排队',
+  }));
+  const guidedById = normalizer.normalize(sessionItem('event_msg', {
+    type: 'user_message', id: 'mobile-steer-contract-id-shape', message: '另一表示的明确引导',
+  }));
+  const queuedById = normalizer.normalize(sessionItem('event_msg', {
+    type: 'user_message', id: 'mobile-queue-contract-id-shape', message: '另一表示的明确排队',
   }));
   const queued = normalizer.normalize(responseMessage('user', '', '下一轮排队', 'turn-next'));
   normalizer.normalize(sessionItem('event_msg', { type: 'task_complete', turn_id: 'turn-main' }));
   const idle = normalizer.normalize(responseMessage('user', '', '空闲输入', 'turn-idle'));
 
+  assert.equal(primary.delivery, 'initial');
+  assert.equal(primary.showGuidedBadge, false);
   assert.equal(steer.delivery, 'steer');
   assert.equal(steer.turnId, 'turn-main');
   assert.equal(duplicateEvent.sourceKey, steer.sourceKey);
+  assert.equal(duplicateEvent.showGuidedBadge, false);
+  assert.equal(guided.delivery, 'steer');
+  assert.equal(guided.turnId, 'turn-main');
+  assert.equal(guided.showGuidedBadge, true);
+  assert.equal(guided.clientRequestId, 'mobile-steer-contract-1');
+  assert.equal(explicitQueue.delivery, 'queued');
+  assert.equal(explicitQueue.showGuidedBadge, false);
+  assert.equal(guidedById.delivery, 'steer');
+  assert.equal(guidedById.showGuidedBadge, true);
+  assert.equal(guidedById.clientRequestId, 'mobile-steer-contract-id-shape');
+  assert.equal(queuedById.delivery, 'queued');
+  assert.equal(queuedById.showGuidedBadge, false);
+  assert.equal(queuedById.clientRequestId, 'mobile-queue-contract-id-shape');
   assert.equal(queued.delivery, 'queued');
   assert.equal(queued.turnId, 'turn-next');
   assert.equal(idle.delivery, 'initial');
+  assert.equal(idle.showGuidedBadge, false);
 });
 
 test('keeps sanitized main-task progress summaries as structured process bodies', () => {
